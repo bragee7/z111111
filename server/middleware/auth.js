@@ -20,6 +20,7 @@ const authMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    decoded.userId = decoded.userId || decoded.id || decoded.sub || null;
     req.user = decoded;
     next();
   } catch (error) {
@@ -51,6 +52,7 @@ const optionalAuth = (req, res, next) => {
   if (token) {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
+      decoded.userId = decoded.userId || decoded.id || decoded.sub || null;
       req.user = decoded;
     } catch (error) {
       // Token invalid, continue without user
