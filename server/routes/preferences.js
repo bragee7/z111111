@@ -31,10 +31,13 @@ router.get('/', authMiddleware, async (req, res) => {
 
 router.put('/', authMiddleware, async (req, res) => {
   try {
+    console.log('[PREFS] PUT request received:', { userId: req.user?.userId, bodyKeys: Object.keys(req.body || {}), rawPhrases: req.body?.voicePhrases, contentType: req.headers['content-type'] });
     const phrases = validatePhrases(req.body.voicePhrases);
     if (!phrases) {
+      console.warn('[PREFS] Validation failed:', { rawPhrases: req.body?.voicePhrases, type: typeof req.body?.voicePhrases, isArray: Array.isArray(req.body?.voicePhrases) });
       return res.status(400).json({ error: 'voicePhrases must be an array of 1-10 non-empty strings (max 50 chars each)' });
     }
+    console.log('[PREFS] Validation passed, saving:', { userId: req.user.userId, count: phrases.length, phrases });
     await query(
       `INSERT INTO user_preferences (user_id, voice_phrases)
        VALUES ($1, $2::jsonb)

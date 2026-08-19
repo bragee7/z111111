@@ -107,10 +107,14 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
       if (!mounted) return;
       setState(() => _phrases = List.of(next));
       VoiceGuardService.setKeywords(next);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
+      final msg = e.toString().contains('400') ? 'Invalid phrase. Check length (max 50 chars).' :
+                  e.toString().contains('401') ? 'Session expired. Please log in again.' :
+                  e.toString().contains('500') ? 'Server error. Try again.' :
+                  'Could not save phrases. Check connection.';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not save phrases. Try again.')),
+        SnackBar(content: Text(msg)),
       );
     }
   }
