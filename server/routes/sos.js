@@ -10,6 +10,7 @@ const { query, auditLog } = require('../db');
 const { supabase, MEDIA_BUCKET } = require('../supabase');
 const { emitNewCase, emitCaseUpdated } = require('../socket');
 const emailService = require('../services/email');
+const { findNearestPoliceStation } = require('../services/policeStationService');
 
 const router = express.Router();
 
@@ -155,26 +156,65 @@ router.post('/', authMiddleware, (req, res, next) => {
     const createdAt = new Date();
     const updatedAt = new Date();
 
-    const result = await query(
-      `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
-      [
-        req.user.userId,
-        req.user.email,
-        locValue,
-        latValue,
-        lngValue,
-        'Pending',
-        notes || '',
-        videoUrl,
-        audioUrl,
-        videoSha256,
-        audioSha256,
-        'manual',
-        createdAt,
-        updatedAt
-      ]
-    );
+    // Tamil Nadu: resolve nearest police station (backend authoritative, fail-open — SOS never blocked)
+    let station = null;
+    if (latValue != null && lngValue != null) {
+      const nLat = Number(latValue);
+      const nLng = Number(lngValue);
+      if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+        try {
+          station = await findNearestPoliceStation(nLat, nLng);
+        } catch (e) {
+          console.warn('[sos] station lookup threw:', e.message);
+          station = null;
+        }
+      }
+    }
+
+    let result;
+    try {
+      result = await query(
+        `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at,
+          nearest_police_station_name, nearest_police_station_address, nearest_police_station_lat, nearest_police_station_lng, nearest_police_station_distance_m, nearest_police_station_osm_id, nearest_police_station_osm_type, nearest_police_station_fetched_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id`,
+        [
+          req.user.userId,
+          req.user.email,
+          locValue,
+          latValue,
+          lngValue,
+          'Pending',
+          notes || '',
+          videoUrl,
+          audioUrl,
+          videoSha256,
+          audioSha256,
+          'manual',
+          createdAt,
+          updatedAt,
+          station?.name ?? null,
+          station?.address ?? null,
+          station?.lat ?? null,
+          station?.lng ?? null,
+          station?.distanceM ?? null,
+          station?.osmId ?? null,
+          station?.osmType ?? null,
+          station?.fetchedAt ?? null,
+        ]
+      );
+    } catch (e) {
+      // Column not yet migrated (e.g. Render prod before migration) → retry without station cols, keep SOS alive
+      if (e.code === '42703') {
+        console.warn('[sos] station columns missing, retrying without them:', e.message);
+        result = await query(
+          `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+          [req.user.userId, req.user.email, locValue, latValue, lngValue, 'Pending', notes || '', videoUrl, audioUrl, videoSha256, audioSha256, 'manual', createdAt, updatedAt]
+        );
+        station = null;
+      } else { throw e; }
+    }
 
     const insertId = result[0].id;
 
@@ -197,14 +237,25 @@ router.post('/', authMiddleware, (req, res, next) => {
       user_id: req.user.userId,
       user_email: req.user.email,
       location_link: locationLink || null,
+      latitude: latValue,
+      longitude: lngValue,
       status: 'Pending',
       notes: notes || '',
       video_url: videoUrl,
       audio_url: audioUrl,
       video_sha256: videoSha256,
       audio_sha256: audioSha256,
+      trigger_type: 'manual',
       created_at: createdAt,
-      updated_at: updatedAt
+      updated_at: updatedAt,
+      nearest_police_station_name: station?.name ?? null,
+      nearest_police_station_address: station?.address ?? null,
+      nearest_police_station_lat: station?.lat ?? null,
+      nearest_police_station_lng: station?.lng ?? null,
+      nearest_police_station_distance_m: station?.distanceM ?? null,
+      nearest_police_station_osm_id: station?.osmId ?? null,
+      nearest_police_station_osm_type: station?.osmType ?? null,
+      nearest_police_station_fetched_at: station?.fetchedAt ?? null,
     };
 
     emitNewCase(newCase);
@@ -236,7 +287,15 @@ const mapCase = (c) => ({
   timestamp: c.created_at,
   createdAt: c.created_at,
   updatedAt: c.updated_at,
-  closureReason: c.closure_reason
+  closureReason: c.closure_reason,
+  nearestPoliceStationName: c.nearest_police_station_name ?? null,
+  nearestPoliceStationAddress: c.nearest_police_station_address ?? null,
+  nearestPoliceStationLat: c.nearest_police_station_lat ?? null,
+  nearestPoliceStationLng: c.nearest_police_station_lng ?? null,
+  nearestPoliceStationDistanceM: c.nearest_police_station_distance_m ?? null,
+  nearestPoliceStationOsmId: c.nearest_police_station_osm_id ?? null,
+  nearestPoliceStationOsmType: c.nearest_police_station_osm_type ?? null,
+  nearestPoliceStationFetchedAt: c.nearest_police_station_fetched_at ?? null,
 });
 
 router.get('/', authMiddleware, async (req, res) => {

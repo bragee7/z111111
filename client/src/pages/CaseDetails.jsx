@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { sosAPI, getMediaUrl } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { buildWhatsAppLink } from '../utils/share';
-import MapView from '../components/MapView';
+import MapView, { policeStationIcon } from '../components/MapView';
 
 const CaseDetails = () => {
   const { id } = useParams();
@@ -330,11 +330,22 @@ const CaseDetails = () => {
             {caseData.locationLink ? (
               <div className="space-y-3">
                 <MapView
-                  markers={[{
-                    lat: caseData.latitude,
-                    lng: caseData.longitude,
-                    popupHtml: `<b>${caseData.status || 'Emergency'} Case</b><br/>From: ${caseData.userEmail || 'Unknown'}<br/><a href="${caseData.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>`,
-                  }]}
+                  markers={(() => {
+                    const ms = [{
+                      lat: caseData.latitude,
+                      lng: caseData.longitude,
+                      popupHtml: `<b>${caseData.status || 'Emergency'} Case</b><br/>From: ${caseData.userEmail || 'Unknown'}<br/><a href="${caseData.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>`,
+                    }];
+                    if (caseData.nearestPoliceStationLat && caseData.nearestPoliceStationLng) {
+                      ms.push({
+                        lat: caseData.nearestPoliceStationLat,
+                        lng: caseData.nearestPoliceStationLng,
+                        icon: policeStationIcon,
+                        popupHtml: `<b>Nearest Police Station</b><br/>${caseData.nearestPoliceStationName || 'Police station'}${caseData.nearestPoliceStationAddress ? '<br/>' + caseData.nearestPoliceStationAddress : ''}${caseData.nearestPoliceStationDistanceM ? '<br/>' + (caseData.nearestPoliceStationDistanceM >= 1000 ? (caseData.nearestPoliceStationDistanceM/1000).toFixed(1) + ' km away' : caseData.nearestPoliceStationDistanceM + ' m away') : ''}`,
+                      });
+                    }
+                    return ms;
+                  })()}
                   height="h-64"
                   emptyText="No location data available"
                 />
@@ -399,6 +410,17 @@ const CaseDetails = () => {
                       <span>WhatsApp Share</span>
                     </a>
                   </div>
+                  {caseData.nearestPoliceStationName && (
+                    <div className="mt-4 pt-3 border-t border-gray-700">
+                      <p className="text-sm font-semibold text-blue-400 mb-1">Nearest Police Station (Tamil Nadu)</p>
+                      <p className="text-white text-sm">{caseData.nearestPoliceStationName}</p>
+                      {caseData.nearestPoliceStationAddress && <p className="text-gray-400 text-xs mt-1">{caseData.nearestPoliceStationAddress}</p>}
+                      <p className="text-gray-400 text-xs mt-1">
+                        {caseData.nearestPoliceStationDistanceM != null ? (caseData.nearestPoliceStationDistanceM >= 1000 ? `${(caseData.nearestPoliceStationDistanceM/1000).toFixed(1)} km away` : `${caseData.nearestPoliceStationDistanceM} m away`) : ''}
+                        {caseData.nearestPoliceStationLat && caseData.nearestPoliceStationLng ? ` \u00B7 ${caseData.nearestPoliceStationLat}, ${caseData.nearestPoliceStationLng}` : ''}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (

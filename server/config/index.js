@@ -50,6 +50,13 @@ const server = {
   port: config.PORT || process.env.PORT || 5000
 };
 
+const policeStation = {
+  enabled: config.POLICE_STATION_ENABLED ?? process.env.POLICE_STATION_ENABLED ?? 'true',
+  radiusM: config.POLICE_STATION_RADIUS_M || process.env.POLICE_STATION_RADIUS_M || '5000',
+  overpassUrl: config.POLICE_STATION_OVERPASS_URL || process.env.POLICE_STATION_OVERPASS_URL || 'https://overpass-api.de/api/interpreter',
+  timeoutMs: config.POLICE_STATION_TIMEOUT_MS || process.env.POLICE_STATION_TIMEOUT_MS || '3500'
+};
+
 const client = {
   url: config.CLIENT_URL || process.env.CLIENT_URL || 'http://localhost:3000',
   apiUrl: config.API_URL || process.env.API_URL || 'http://localhost:5000'
@@ -92,5 +99,6 @@ module.exports = {
   jwt,
   email,
   server,
-  client
+  client,
+  policeStation
 };

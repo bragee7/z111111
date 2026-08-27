@@ -41,7 +41,15 @@ const mapCase = (c) => ({
   updatedAt: c.updated_at,
   waitingDuration: c.waiting_duration,
   resolutionTime: c.resolution_time,
-  resolvedAt: c.resolved_at
+  resolvedAt: c.resolved_at,
+  nearestPoliceStationName: c.nearest_police_station_name ?? null,
+  nearestPoliceStationAddress: c.nearest_police_station_address ?? null,
+  nearestPoliceStationLat: c.nearest_police_station_lat ?? null,
+  nearestPoliceStationLng: c.nearest_police_station_lng ?? null,
+  nearestPoliceStationDistanceM: c.nearest_police_station_distance_m ?? null,
+  nearestPoliceStationOsmId: c.nearest_police_station_osm_id ?? null,
+  nearestPoliceStationOsmType: c.nearest_police_station_osm_type ?? null,
+  nearestPoliceStationFetchedAt: c.nearest_police_station_fetched_at ?? null,
 });
 
 const mapContact = (c) => ({

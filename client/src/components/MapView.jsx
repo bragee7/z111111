@@ -16,6 +16,17 @@ const defaultIcon = L.icon({
   popupAnchor: [0, -28],
 });
 
+export const policeStationIcon = L.icon({
+  iconUrl:
+    'data:image/svg+xml;charset=UTF-8,' +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#2563EB" stroke="#fff" stroke-width="1.5"><path d="M3 21V4a3 3 0 013-3h8a3 3 0 013 3v17" fill="#2563EB"/><path d="M9 9h6M9 13h6M9 17h6" stroke="#fff" stroke-width="1.2"/><circle cx="15" cy="7.5" r="1" fill="#fff"/></svg>`
+    ),
+  iconSize: [30, 30],
+  iconAnchor: [15, 30],
+  popupAnchor: [0, -28],
+});
+
 const MapView = ({
   markers = [],
   height = 'h-72',

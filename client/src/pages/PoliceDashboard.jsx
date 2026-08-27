@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { sosAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import MapView from '../components/MapView';
+import MapView, { policeStationIcon } from '../components/MapView';
 
 const PoliceDashboard = () => {
   const { user } = useAuth();
@@ -88,13 +88,24 @@ const PoliceDashboard = () => {
   const pendingCases = cases.filter(c => c.status === 'Pending');
   const resolvedCases = cases.filter(c => c.status === 'Resolved');
 
-  const mapMarkers = cases
-    .filter(c => c.latitude && c.longitude)
-    .map(c => ({
-      lat: Number(c.latitude),
-      lng: Number(c.longitude),
-      popupHtml: `<b>${c.status} Case</b><br/>From: ${c.userEmail || 'Unknown User'}<br/>${formatDate(c.timestamp)}${c.locationLink ? `<br/><a href="${c.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>` : ''}`,
-    }));
+  const mapMarkers = (() => {
+    const victim = cases
+      .filter(c => c.latitude && c.longitude)
+      .map(c => ({
+        lat: Number(c.latitude),
+        lng: Number(c.longitude),
+        popupHtml: `<b>${c.status} Case</b><br/>From: ${c.userEmail || 'Unknown User'}<br/>${formatDate(c.timestamp)}${c.locationLink ? `<br/><a href="${c.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>` : ''}`,
+      }));
+    const stations = cases
+      .filter(c => c.nearestPoliceStationLat && c.nearestPoliceStationLng)
+      .map(c => ({
+        lat: Number(c.nearestPoliceStationLat),
+        lng: Number(c.nearestPoliceStationLng),
+        icon: policeStationIcon,
+        popupHtml: `<b>Nearest Station</b><br/>${c.nearestPoliceStationName || 'Police station'}<br/><span style="color:#9ca3af;font-size:11px">for case ${c.id.slice(0, 8)}${c.nearestPoliceStationDistanceM ? ' \u00B7 ' + (c.nearestPoliceStationDistanceM >= 1000 ? (c.nearestPoliceStationDistanceM/1000).toFixed(1) + ' km' : c.nearestPoliceStationDistanceM + ' m') : ''}</span>`,
+      }));
+    return [...victim, ...stations];
+  })();
 
   if (loading) {
     return (
@@ -267,6 +278,11 @@ const PoliceDashboard = () => {
                           Closed: {caseItem.closureReason}
                         </span>
                       )}
+                    </div>
+                  )}
+                  {caseItem.nearestPoliceStationName && (
+                    <div className="mt-2 flex items-center space-x-2 text-xs text-blue-300">
+                      <span>🏛 {caseItem.nearestPoliceStationName}{caseItem.nearestPoliceStationDistanceM != null ? ` \u00B7 ${caseItem.nearestPoliceStationDistanceM >= 1000 ? (caseItem.nearestPoliceStationDistanceM/1000).toFixed(1) + ' km' : caseItem.nearestPoliceStationDistanceM + ' m'} away` : ''}</span>
                     </div>
                   )}
                 </Link>

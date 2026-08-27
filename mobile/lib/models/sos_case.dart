@@ -13,6 +13,15 @@ class SosCase {
   final DateTime? timestamp;
   final DateTime? createdAt;
   final DateTime? updatedAt;
+  // Tamil Nadu: nearest police station snapshot (nullable, backward-compat)
+  final String? nearestPoliceStationName;
+  final String? nearestPoliceStationAddress;
+  final double? nearestPoliceStationLat;
+  final double? nearestPoliceStationLng;
+  final int? nearestPoliceStationDistanceM;
+  final int? nearestPoliceStationOsmId;
+  final String? nearestPoliceStationOsmType;
+  final DateTime? nearestPoliceStationFetchedAt;
 
   const SosCase({
     required this.id,
@@ -29,6 +38,14 @@ class SosCase {
     this.timestamp,
     this.createdAt,
     this.updatedAt,
+    this.nearestPoliceStationName,
+    this.nearestPoliceStationAddress,
+    this.nearestPoliceStationLat,
+    this.nearestPoliceStationLng,
+    this.nearestPoliceStationDistanceM,
+    this.nearestPoliceStationOsmId,
+    this.nearestPoliceStationOsmType,
+    this.nearestPoliceStationFetchedAt,
   });
 
   factory SosCase.fromJson(Map<String, dynamic> json) {
@@ -52,6 +69,22 @@ class SosCase {
       timestamp: parseDate(json['timestamp'] ?? json['createdAt'] ?? json['created_at']),
       createdAt: parseDate(json['createdAt'] ?? json['created_at']),
       updatedAt: parseDate(json['updatedAt'] ?? json['updated_at']),
+      nearestPoliceStationName: json['nearestPoliceStationName'] ?? json['nearest_police_station_name'],
+      nearestPoliceStationAddress: json['nearestPoliceStationAddress'] ?? json['nearest_police_station_address'],
+      nearestPoliceStationLat: (json['nearestPoliceStationLat'] ?? json['nearest_police_station_lat']) != null
+          ? double.tryParse('${json['nearestPoliceStationLat'] ?? json['nearest_police_station_lat']}')
+          : null,
+      nearestPoliceStationLng: (json['nearestPoliceStationLng'] ?? json['nearest_police_station_lng']) != null
+          ? double.tryParse('${json['nearestPoliceStationLng'] ?? json['nearest_police_station_lng']}')
+          : null,
+      nearestPoliceStationDistanceM: (json['nearestPoliceStationDistanceM'] ?? json['nearest_police_station_distance_m']) != null
+          ? int.tryParse('${json['nearestPoliceStationDistanceM'] ?? json['nearest_police_station_distance_m']}')
+          : null,
+      nearestPoliceStationOsmId: (json['nearestPoliceStationOsmId'] ?? json['nearest_police_station_osm_id']) != null
+          ? int.tryParse('${json['nearestPoliceStationOsmId'] ?? json['nearest_police_station_osm_id']}')
+          : null,
+      nearestPoliceStationOsmType: json['nearestPoliceStationOsmType'] ?? json['nearest_police_station_osm_type'],
+      nearestPoliceStationFetchedAt: parseDate(json['nearestPoliceStationFetchedAt'] ?? json['nearest_police_station_fetched_at']),
     );
   }
 
@@ -59,6 +92,16 @@ class SosCase {
 
   bool get hasLiveLocation =>
       isPending && updatedAt != null && createdAt != null && updatedAt!.isAfter(createdAt!);
+
+  bool get hasNearestStation =>
+      nearestPoliceStationLat != null && nearestPoliceStationLng != null;
+
+  String? get nearestStationDistanceLabel {
+    final m = nearestPoliceStationDistanceM;
+    if (m == null) return null;
+    if (m < 1000) return '$m m away';
+    return '${(m / 1000).toStringAsFixed(1)} km away';
+  }
 
   SosCase copyWith({
     String? status,
@@ -80,6 +123,14 @@ class SosCase {
       timestamp: timestamp,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      nearestPoliceStationName: nearestPoliceStationName,
+      nearestPoliceStationAddress: nearestPoliceStationAddress,
+      nearestPoliceStationLat: nearestPoliceStationLat,
+      nearestPoliceStationLng: nearestPoliceStationLng,
+      nearestPoliceStationDistanceM: nearestPoliceStationDistanceM,
+      nearestPoliceStationOsmId: nearestPoliceStationOsmId,
+      nearestPoliceStationOsmType: nearestPoliceStationOsmType,
+      nearestPoliceStationFetchedAt: nearestPoliceStationFetchedAt,
     );
   }
 }
