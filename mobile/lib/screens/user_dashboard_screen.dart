@@ -109,12 +109,40 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
       VoiceGuardService.setKeywords(next);
     } catch (e) {
       if (!mounted) return;
-      final msg = e.toString().contains('400') ? 'Invalid phrase. Check length (max 50 chars).' :
-                  e.toString().contains('401') ? 'Session expired. Please log in again.' :
-                  e.toString().contains('500') ? 'Server error. Try again.' :
-                  'Could not save phrases. Check connection.';
+      final s = e.toString();
+      try {
+        final f = await File('/sdcard/Documents/prefs_error.txt').writeAsString(
+          'TIME: ${DateTime.now()}\nERROR: $s\nTYPE: ${e.runtimeType}\n',
+          mode: FileMode.append,
+        );
+        debugPrint('[PREFS] Error written to ${f.path}');
+      } catch (_) {}
+      debugPrint('[PREFS] Save error: $s');
+      String msg;
+      if (s.contains('400')) {
+        msg = 'Invalid phrase. Check length (max 50 chars).';
+      } else if (s.contains('401')) {
+        msg = 'Session expired. Please log in again.';
+      } else if (s.contains('500')) {
+        msg = 'Server error. Try again.';
+      } else if (s.contains('timeout') || s.contains('Timeout')) {
+        msg = 'Server took too long. It may be waking up. Please wait 30s and try again.';
+      } else if (s.contains('connection') || s.contains('Connection')) {
+        msg = 'No internet connection. Check your network.';
+      } else {
+        msg = 'Save failed. Full error saved to Documents/prefs_error.txt';
+      }
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Save Error'),
+          content: SingleChildScrollView(child: Text(s, style: const TextStyle(fontSize: 12))),
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+        ),
+      );
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg)),
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 4)),
       );
     }
   }

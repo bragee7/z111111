@@ -117,6 +117,65 @@ Open browser: http://localhost:3000
 - `GET /api/sos` - Get all cases (police: all, user: own cases)
 - `GET /api/sos/:id` - Get single case details
 - `PUT /api/sos/:id` - Update case status/notes
+- `GET /api/sos/:id/timeline` - Get full audit timeline for a case
+- `GET /api/preferences` - Get user's voice guard phrases
+- `PUT /api/preferences` - Update user's voice guard phrases (max 10)
+
+## ZELDA Free Features 1-15
+
+### F1 - WhatsApp Share
+Share a case location instantly via WhatsApp with a formatted link (Web, Case Details page).
+
+### F2 - Live Maps
+Live interactive maps (Leaflet + OpenStreetMap) showing emergency case locations (Web, Police Dashboard + Case Details).
+
+### F3 - SHA-256 Integrity
+Every video/audio upload is hashed with SHA-256; hashes are stored and displayed so evidence integrity can be verified.
+
+### F4 - Rate Limiting
+Login, registration and OTP endpoints are rate-limited (login: 10/min, register: 5/60min, OTP: 10/min) to prevent brute force.
+
+### F5 - Idle Auto-Logout
+Web sessions log out automatically after 15 minutes of inactivity for security.
+
+### F6 - Custom Voice Phrases
+Users define up to 10 custom voice phrases (default: `help me`) that trigger an SOS when spoken. Editable in the mobile app, synced via `/api/preferences`.
+
+### F7 - Priority Contacts
+Emergency contacts have a priority (P1-P5, P1 = highest). Mobile app shows priority badges and sends alerts in priority order.
+
+### F8 - Closure Workflow
+Police can resolve a case with a required closure reason (`False Alarm`, `Victim Safe`, `Police Intervention`, `Emergency Resolved`, `Duplicate Case`, `Other`). Closure events are audited.
+
+### F9 - Case Timeline
+Every case exposes its full audit timeline (created, status changes, notes, location updates, closure) via `/api/sos/:id/timeline`.
+
+### F10 - Profile Management
+Users can view and update their name, email and password from the profile page.
+
+### F11 - GDPR Export
+Users can download their full personal data (profile, contacts, SOS cases) as JSON, per GDPR Article 20.
+
+### F12 - Response Time
+System tracks `first_response_at` per case and reports average/max response times overall and per officer (`/api/admin/stats/response-times`).
+
+### F13 - Officer KPIs
+Per-officer performance dashboard: cases handled, resolved/pending counts, average response time (`/api/admin/stats/officer-kpis`).
+
+### F14 - Overview Stats
+Admin dashboard charts: case status distribution, weekly/monthly case trend with toggle, and a geographic case heatmap (`/api/admin/stats/status-distribution`, `/series`, `/geo`).
+
+### F15 - Web Floating SOS
+One-tap floating SOS button on the web (user role) that sends an SOS with the current geolocation to police.
+
+### Database Migration
+- `features_1_15_columns`: added `closure_reason`, `first_response_at`, `video_sha256`, `audio_sha256` to `sos_cases`; `priority` to `contacts`; new `user_preferences` table with RLS.
+
+### Deployed Commits
+- `3eea683` - Phase 1 (F4, F5, F10, F11)
+- `7c31d9c` - Phase 2 (F1, F2, F3, F7, F8, F9, F12, F13)
+- `4b8172d` - Phase 4/5 (F14, F6, F15)
+- `88f08c0` - Fix: preferences user id mapping
 
 ## Project Structure
 
