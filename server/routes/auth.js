@@ -228,8 +228,11 @@ router.post('/register', async (req, res) => {
     if (error.code === 'NO_DATABASE_URL' || error.message?.includes('DATABASE_URL not configured')) {
       return res.status(500).json({ error: 'Server misconfigured: DATABASE_URL not set.' });
     }
-    const details = process.env.NODE_ENV !== 'production' ? ` (${error.code || ''} ${error.message})`.trim() : '';
-    res.status(500).json({ error: `Server error during registration${details ? ': ' + details : ''}` });
+    const rmsg = (error.message || '').toLowerCase();
+    if (error.code === 'XX000' || rmsg.includes('tenant') || rmsg.includes('enotfound') || rmsg.includes('not found')) {
+      return res.status(500).json({ error: `Database unreachable: ${error.message}. Check DATABASE_URL user is postgres.<project_ref>.` });
+    }
+    res.status(500).json({ error: `Server error during registration: ${error.code || ''} ${error.message}`.trim() });
   }
 });
 
@@ -380,15 +383,19 @@ router.post('/login', async (req, res) => {
     if (error.code === 'NO_DATABASE_URL' || error.message?.includes('DATABASE_URL not configured')) {
       return res.status(500).json({ error: 'Server misconfigured: DATABASE_URL not set. Admin must set it in Render → Environment.' });
     }
-    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND') {
+    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND' || error.code === 'XX000') {
       return res.status(500).json({ error: 'Database unreachable. Supabase may be paused or DATABASE_URL host is wrong.' });
+    }
+    // Supabase pooler returns XX000 with message containing ENOTFOUND/tenant not found when user is wrong
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('enotfound') || msg.includes('tenant') || msg.includes('not found') || msg.includes('getaddrinfo')) {
+      return res.status(500).json({ error: `Database unreachable: ${error.message}. Check DATABASE_URL user is postgres.<project_ref> (not zelda_app) and host is correct.` });
     }
     if (error.message?.includes('password authentication failed') || error.code === '28P01') {
       return res.status(500).json({ error: 'Database password incorrect — update DATABASE_URL with correct Supabase password.' });
     }
-    // Fallback — include code in non-production for debugging
-    const details = process.env.NODE_ENV !== 'production' ? ` (${error.code || ''} ${error.message})`.trim() : '';
-    res.status(500).json({ error: `Server error during login${details ? ': ' + details : ''}` });
+    // Fallback — always include code+message (even in production) so Render logs + client can debug
+    res.status(500).json({ error: `Server error during login: ${error.code || ''} ${error.message}`.trim() });
   }
 });
 
