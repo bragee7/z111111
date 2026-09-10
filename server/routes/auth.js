@@ -224,8 +224,12 @@ router.post('/register', async (req, res) => {
       personalEmail
     });
   } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({ error: 'Server error during registration' });
+    console.error('Register error:', error.code || '', error.message);
+    if (error.code === 'NO_DATABASE_URL' || error.message?.includes('DATABASE_URL not configured')) {
+      return res.status(500).json({ error: 'Server misconfigured: DATABASE_URL not set.' });
+    }
+    const details = process.env.NODE_ENV !== 'production' ? ` (${error.code || ''} ${error.message})`.trim() : '';
+    res.status(500).json({ error: `Server error during registration${details ? ': ' + details : ''}` });
   }
 });
 
@@ -371,8 +375,20 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error during login' });
+    console.error('Login error:', error.code || '', error.message, error.stack?.split('\n')[1] || '');
+    // Return actionable error instead of generic 500
+    if (error.code === 'NO_DATABASE_URL' || error.message?.includes('DATABASE_URL not configured')) {
+      return res.status(500).json({ error: 'Server misconfigured: DATABASE_URL not set. Admin must set it in Render → Environment.' });
+    }
+    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND') {
+      return res.status(500).json({ error: 'Database unreachable. Supabase may be paused or DATABASE_URL host is wrong.' });
+    }
+    if (error.message?.includes('password authentication failed') || error.code === '28P01') {
+      return res.status(500).json({ error: 'Database password incorrect — update DATABASE_URL with correct Supabase password.' });
+    }
+    // Fallback — include code in non-production for debugging
+    const details = process.env.NODE_ENV !== 'production' ? ` (${error.code || ''} ${error.message})`.trim() : '';
+    res.status(500).json({ error: `Server error during login${details ? ': ' + details : ''}` });
   }
 });
 

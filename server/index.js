@@ -60,9 +60,14 @@ const initDB = async () => {
     const connection = await pool.connect();
     console.log('✅ Database connected successfully!');
     console.log(`🐘 Postgres via Supabase`);
+    // Verify critical tables exist
+    const tables = await connection.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('users','sos_cases','contacts','audit_log','user_preferences')");
+    console.log(`📋 Tables found: ${tables.rows.map(r=>r.tablename).join(', ') || '(none — run schema.sql!)'}`);
     connection.release();
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.error('❌ Database connection failed:', error.code || '', error.message);
+    console.error('   → Check DATABASE_URL on Render → Environment. Supabase may be PAUSED — resume in Supabase Dashboard.');
+    console.error('   → Verify connection string uses correct password & host (db.<ref>.supabase.co) and ?sslmode=require');
   }
 };
 
@@ -74,15 +79,44 @@ app.use('/api/contacts', contactsRoutes);
 app.use('/api/admin', adminRoutes);
   app.use('/api/preferences', preferencesRoutes);
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  // Real liveness: ping DB instead of just checking env presence
+  let dbStatus = 'not configured';
+  let dbError = null;
+  if (config.db.connectionString) {
+    try {
+      const c = await pool.connect();
+      await c.query('SELECT 1');
+      c.release();
+      dbStatus = 'connected';
+    } catch (e) {
+      dbStatus = 'error';
+      dbError = `${e.code || ''} ${e.message}`.trim();
+    }
+  }
   res.json({
-    status: 'ok',
+    status: dbStatus === 'connected' ? 'ok' : 'degraded',
     message: 'Women Safety Guardian API is running',
     config: {
-      db: config.db.connectionString ? 'supabase' : 'not configured',
+      db: dbStatus,
+      dbError: dbError || undefined,
       email: config.email.user ? 'configured' : 'not configured'
     }
   });
+});
+
+// Lightweight DB probe without auth — for Render debugging
+app.get('/api/health/db', async (req, res) => {
+  if (!config.db.connectionString) return res.status(500).json({ ok: false, error: 'DATABASE_URL not set on server' });
+  try {
+    const c = await pool.connect();
+    const r = await c.query('SELECT 1 as ok');
+    const t = await c.query("SELECT tablename FROM pg_tables WHERE schemaname='public' LIMIT 5");
+    c.release();
+    res.json({ ok: true, probe: r.rows[0], tables: t.rows.map(x=>x.tablename) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, code: e.code || null });
+  }
 });
 
 app.get('/api/config-status', (req, res) => {
