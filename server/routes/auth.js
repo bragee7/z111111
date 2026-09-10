@@ -383,13 +383,13 @@ router.post('/login', async (req, res) => {
     if (error.code === 'NO_DATABASE_URL' || error.message?.includes('DATABASE_URL not configured')) {
       return res.status(500).json({ error: 'Server misconfigured: DATABASE_URL not set. Admin must set it in Render → Environment.' });
     }
-    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND' || error.code === 'XX000') {
-      return res.status(500).json({ error: 'Database unreachable. Supabase may be paused or DATABASE_URL host is wrong.' });
-    }
-    // Supabase pooler returns XX000 with message containing ENOTFOUND/tenant not found when user is wrong
+    // Supabase pooler returns XX000 with message containing ENOTFOUND/tenant not found when user is wrong — check message first for actionable hint
     const msg = (error.message || '').toLowerCase();
     if (msg.includes('enotfound') || msg.includes('tenant') || msg.includes('not found') || msg.includes('getaddrinfo')) {
-      return res.status(500).json({ error: `Database unreachable: ${error.message}. Check DATABASE_URL user is postgres.<project_ref> (not zelda_app) and host is correct.` });
+      return res.status(500).json({ error: `Database unreachable: ${error.message}. Check DATABASE_URL user is postgres.<project_ref> (not zelda_app) and host is correct. | code=${error.code}` });
+    }
+    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND' || error.code === 'XX000') {
+      return res.status(500).json({ error: `Database unreachable (${error.code}): ${error.message}. Supabase may be paused or DATABASE_URL host/user is wrong.` });
     }
     if (error.message?.includes('password authentication failed') || error.code === '28P01') {
       return res.status(500).json({ error: 'Database password incorrect — update DATABASE_URL with correct Supabase password.' });
