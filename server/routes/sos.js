@@ -68,25 +68,33 @@ const uploadMedia = async (file) => {
     sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   } catch (_) {}
 
-  const { error } = await supabase.storage
-    .from(MEDIA_BUCKET)
-    .upload(fileName, fs.createReadStream(file.path), {
-      contentType: file.mimetype,
-      upsert: false,
-      duplex: fileSize > 0 ? 'half' : undefined
-    });
-
+  // Fail-OPEN: a storage blip must never lose a victim alert.
   try {
-    fs.unlink(file.path, () => {});
-  } catch (_) {}
+    const { error } = await supabase.storage
+      .from(MEDIA_BUCKET)
+      .upload(fileName, fs.createReadStream(file.path), {
+        contentType: file.mimetype,
+        upsert: false,
+        duplex: fileSize > 0 ? 'half' : undefined
+      });
 
-  if (error) throw error;
+    try { fs.unlink(file.path, () => {}); } catch (_) {}
 
-  const { data } = supabase.storage
-    .from(MEDIA_BUCKET)
-    .getPublicUrl(fileName);
+    if (error) {
+      console.error('[sos] media upload failed (fail-open, case still created):', error.message || error);
+      return null;
+    }
 
-  return { publicUrl: data.publicUrl, sha256 };
+    const { data } = supabase.storage
+      .from(MEDIA_BUCKET)
+      .getPublicUrl(fileName);
+
+    return { publicUrl: data.publicUrl, sha256 };
+  } catch (err) {
+    console.error('[sos] media upload threw (fail-open, case still created):', err && err.message ? err.message : err);
+    try { fs.unlink(file.path, () => {}); } catch (_) {}
+    return null;
+  }
 };
 
 const notifySOS = async (caseForEmail, videoUrl, audioUrl, userId) => {
@@ -146,8 +154,8 @@ router.post('/', authMiddleware, (req, res, next) => {
     const videoFile = req.files?.video?.[0];
     const audioFile = req.files?.audio?.[0];
 
-    const videoMedia = await uploadMedia(videoFile).catch((e) => { console.error('[sos] uploadMedia(video) rejected:', e && (e.message || e)); return null; });
-    const audioMedia = await uploadMedia(audioFile).catch((e) => { console.error('[sos] uploadMedia(audio) rejected:', e && (e.message || e)); return null; });
+    const videoMedia = await uploadMedia(videoFile);
+    const audioMedia = await uploadMedia(audioFile);
     const videoUrl = videoMedia ? videoMedia.publicUrl : null;
     const audioUrl = audioMedia ? audioMedia.publicUrl : null;
     const videoSha256 = videoMedia ? videoMedia.sha256 : null;
@@ -266,7 +274,7 @@ router.post('/', authMiddleware, (req, res, next) => {
     });
   } catch (error) {
     console.error('Create case error:', error);
-    res.status(500).json({ error: 'Error creating SOS case', detail: (error && (error.message || String(error))) || null, code: error && error.code, stack: error && error.stack });
+    res.status(500).json({ error: 'Error creating SOS case' });
   }
 });
 
