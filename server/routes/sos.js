@@ -266,7 +266,7 @@ router.post('/', authMiddleware, (req, res, next) => {
     });
   } catch (error) {
     console.error('Create case error:', error);
-    res.status(500).json({ error: 'Error creating SOS case' });
+    res.status(500).json({ error: 'Error creating SOS case', detail: (error && (error.message || String(error))) || null, code: error && error.code });
   }
 });
 
