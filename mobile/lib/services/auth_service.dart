@@ -61,8 +61,14 @@ class AuthService {
       final response = await _api.get('/auth/me');
       final data = Map<String, dynamic>.from(response.data as Map);
       return AppUser.fromJson(Map<String, dynamic>.from(data['user'] as Map));
-    } on DioException {
-      return null;
+    } on DioException catch (e) {
+      // Only an affirmative 401 means "unauthorized" (session expired).
+      // Network/timeout/connection errors and 5xx must propagate so the
+      // caller can preserve the cached session instead of wiping it.
+      if (e.response?.statusCode == 401) {
+        return null;
+      }
+      rethrow;
     }
   }
 }

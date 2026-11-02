@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../core/theme.dart';
 import '../core/widgets.dart';
 import '../services/location_service.dart';
+import '../services/voice_guard_service.dart';
 import '../state/auth_provider.dart';
 import 'otp_screen.dart';
 import 'register_screen.dart';
@@ -23,6 +24,12 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _showPassword = false;
   bool _loading = false;
   String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    VoiceGuardService.flog('route', 'login-screen shown');
+  }
 
   @override
   void dispose() {

@@ -5,13 +5,16 @@ const path = require('path');
 const rateLimit = require('express-rate-limit');
 
 const config = require('./config');
+const { isAllowedOrigin } = require('./config/origins');
 const { pool } = require('./db');
+const storage = require('./storage');
 const { initSocket } = require('./socket');
 const authRoutes = require('./routes/auth');
 const sosRoutes = require('./routes/sos');
 const contactsRoutes = require('./routes/contacts');
 const adminRoutes = require('./routes/admin');
 const preferencesRoutes = require('./routes/preferences');
+const policeStationRoutes = require('./routes/policeStations');
 
 const app = express();
 const PORT = config.server.port;
@@ -42,16 +45,23 @@ const strictLimiter = (windowMs, max) =>
     message: { error: rateLimitMsg }
   });
 
+app.use(cors({
+  origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 86400
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 app.use('/api/', generalLimiter);
 app.use('/api/auth/login', strictLimiter(rlWindowMs, 10));
 app.use('/api/auth/register', strictLimiter(60 * 60 * 1000, 5));
 app.use('/api/auth/verify-otp', strictLimiter(rlWindowMs, 10));
 app.use('/api/auth/resend-otp', strictLimiter(rlWindowMs, 10));
-app.post('/api/sos', strictLimiter(rlWindowMs, 10));
-
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Strict rate-limit for SOS creation. Explicit next() fall-through to the
+// sosRoutes router mounted below (app.use('/api/sos', sosRoutes) handles POST /).
+app.post('/api/sos', strictLimiter(rlWindowMs, 10), (req, res, next) => next());
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -59,7 +69,7 @@ const initDB = async () => {
   try {
     const connection = await pool.connect();
     console.log('✅ Database connected successfully!');
-    console.log(`🐘 Postgres via Supabase`);
+    console.log(`🐘 Postgres via Neon/Supabase`);
     // Verify critical tables exist
     const tables = await connection.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('users','sos_cases','contacts','audit_log','user_preferences')");
     console.log(`📋 Tables found: ${tables.rows.map(r=>r.tablename).join(', ') || '(none — run schema.sql!)'}`);
@@ -78,6 +88,9 @@ app.use('/api/sos', sosRoutes);
 app.use('/api/contacts', contactsRoutes);
 app.use('/api/admin', adminRoutes);
   app.use('/api/preferences', preferencesRoutes);
+// Police-station directory + routing: PUBLIC (directory data, no PII) so the
+// mobile app can read it before the user logs in.
+app.use('/api/police-stations', policeStationRoutes);
 
 app.get('/api/health', async (req, res) => {
   // Real liveness: ping DB instead of just checking env presence
@@ -121,9 +134,11 @@ app.get('/api/health/db', async (req, res) => {
 
 app.get('/api/config-status', (req, res) => {
   const supabaseConfigured = config.supabase.url && (config.supabase.serviceRoleKey || config.supabase.anonKey);
+  const storageConfigured = storage.isConfigured();
   res.json({
     database: config.db.connectionString ? '✅ Connected' : '❌ Not configured',
-    supabase: supabaseConfigured ? '✅ Configured' : '❌ Not configured',
+    storage: storageConfigured ? 'Configured (' + storage.configuredBackend() + ')' : 'Not configured',
+    supabase: supabaseConfigured ? 'Configured' : 'Not configured',
     jwt: config.jwt.secret ? '✅ Configured' : '❌ Not configured',
     email: config.email.sendgridApiKey ? '✅ Configured (SendGrid)' : '⚠️ Not configured (SOS emails will not be sent)',
     policeEmail: config.email.policeEmail || 'Not set'
@@ -140,7 +155,7 @@ app.get('*', (req, res) => {
 
 httpServer.listen(PORT, () => {
   console.log(`🚀 Women Safety Guardian running on http://localhost:${PORT}`);
-  console.log(`🐘 Database: Supabase`);
+  console.log(`🐘 Database: Postgres (Neon/Supabase)`);
   console.log(`📧 Email: ${config.email.user || 'Not configured'}`);
   console.log(`👮 Police Email: ${config.email.policeEmail}`);
 });

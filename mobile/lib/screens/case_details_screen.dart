@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -31,6 +33,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
   bool _loading = true;
   String _error = '';
   String _notes = '';
+  final TextEditingController _notesController = TextEditingController();
   bool _saving = false;
   bool _updating = false;
 
@@ -54,10 +57,12 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
       setState(() {
         _caseData = caseData;
         _notes = caseData.notes;
+        _notesController.text = caseData.notes;
         _loading = false;
       });
       _initMedia(caseData);
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = 'Failed to load case details';
         _loading = false;
@@ -67,6 +72,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
 
   Future<void> _initMedia(SosCase caseData) async {
     _videoController?.dispose();
+    _videoController = null;
     final videoUrl = AppConfig.mediaUrl(caseData.videoUrl);
     if (videoUrl.isNotEmpty) {
       try {
@@ -87,6 +93,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
   void dispose() {
     _videoController?.dispose();
     _audioPlayer.dispose();
+    _notesController.dispose();
     super.dispose();
   }
 
@@ -96,6 +103,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
       await _sosService.updateCase(widget.caseId, status: newStatus, notes: _notes);
       await _fetchCase();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = 'Failed to update case');
     } finally {
       if (mounted) setState(() => _updating = false);
@@ -108,6 +116,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
       await _sosService.updateCase(widget.caseId, notes: _notes);
       await _fetchCase();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = 'Failed to update notes');
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -192,7 +201,12 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
       ),
     );
 
-    await Printing.layoutPdf(onLayout: (format) => doc.save());
+    try {
+      await Printing.layoutPdf(onLayout: (format) => doc.save());
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Failed to export PDF: $e');
+    }
   }
 
   pw.Widget _sectionTitle(String title) {
@@ -586,7 +600,7 @@ class _CaseDetailsScreenState extends State<CaseDetailsScreen> {
           ),
           const SizedBox(height: 12),
           TextField(
-            controller: TextEditingController(text: _notes),
+            controller: _notesController,
             onChanged: (v) => _notes = v,
             maxLines: 5,
             style: const TextStyle(color: AppColors.gray900),
@@ -678,13 +692,20 @@ class _AudioPlayerTile extends StatefulWidget {
 
 class _AudioPlayerTileState extends State<_AudioPlayerTile> {
   bool _playing = false;
+  StreamSubscription<PlayerState>? _stateSub;
 
   @override
   void initState() {
     super.initState();
-    widget.player.onPlayerStateChanged.listen((state) {
+    _stateSub = widget.player.onPlayerStateChanged.listen((state) {
       if (mounted) setState(() => _playing = state == PlayerState.playing);
     });
+  }
+
+  @override
+  void dispose() {
+    _stateSub?.cancel();
+    super.dispose();
   }
 
   @override

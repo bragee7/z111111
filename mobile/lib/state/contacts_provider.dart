@@ -8,17 +8,26 @@ class ContactsProvider extends ChangeNotifier {
 
   List<EmergencyContact> _contacts = [];
   bool _loading = false;
+  String _error = '';
 
   List<EmergencyContact> get contacts => _contacts;
   bool get isLoading => _loading;
+  String get error => _error;
+
+  void dismissError() {
+    _error = '';
+    notifyListeners();
+  }
 
   Future<void> fetchContacts() async {
     _loading = true;
+    _error = '';
     notifyListeners();
     try {
       _contacts = await _contactsService.getContacts();
-    } catch (_) {
+    } catch (e) {
       _contacts = [];
+      _error = 'Could not load contacts: $e';
     } finally {
       _loading = false;
       notifyListeners();

@@ -3,7 +3,7 @@ const config = require('./config');
 
 if (!config.db.connectionString) {
   console.error('❌ DATABASE_URL is empty! Set it in server/config/config.env or Render → Environment → DATABASE_URL');
-  console.error('   Expected: postgres://user:pass@host:5432/db?sslmode=require  (Supabase pooled connection string)');
+  console.error('   Expected: postgres://user:pass@host:5432/db?sslmode=require  (Neon or Supabase pooled connection string)');
 }
 
 const pool = new Pool({

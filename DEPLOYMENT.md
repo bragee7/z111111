@@ -1,225 +1,143 @@
-# Deployment Guide: Vercel + Render
+# Deployment Guide — ZELDA backend
 
-This guide covers deploying the Women Safety Guardian application to **Vercel** (frontend) and **Render** (backend).
+Current target: **Render** for the Express API and **Neon Postgres + Backblaze B2**
+for data and evidence. The React dashboard is built into `client/dist` and served
+by the same Express process.
 
----
+## Live service
 
-## Quick Summary
+| Item | Value |
+|------|-------|
+| API | `https://zelda-api-kbtl.onrender.com` |
+| Render service | `zelda-api-kbtl` |
+| Render repo | `bragee7/z111111` (repo root = contents of `zelda1/`) |
+| Health | `GET /api/health` |
+| Database | Neon Postgres (pooled, SSL) |
+| Evidence | Backblaze B2 private bucket `zeldadb` |
 
-| Service | Platform | URL Pattern |
-|---------|----------|-------------|
-| Frontend | Vercel | `https://your-app.vercel.app` |
-| Backend | Render | `https://your-backend.onrender.com` |
+The local `origin` remote is `unknown235669-cmyk/zelda1-full`, which is **not**
+the repo Render watches. Deploying to the live service requires pushing the
+`zelda1` subtree to `bragee7/z111111` (root layout, no nested `zelda1/` folder).
 
----
+## 1. Prerequisites
 
-## Prerequisites
+- Render account with access to the live service (or a new Blueprint).
+- Neon project and pooled `DATABASE_URL`.
+- B2 bucket + bucket-scoped application key.
+- A `JWT_SECRET` generated with:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
 
-- GitHub account
-- Vercel account (https://vercel.com)
-- Render account (https://render.com)
-- Project pushed to GitHub
+## 2. Render environment variables
 
----
-
-## Step 1: Push Code to GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/your-username/zelda2-main.git
-git push -u origin main
-```
-
----
-
-## Step 2: Deploy Backend to Render
-
-### 2.1 Create Web Service
-
-1. Log in to **Render Dashboard**
-2. Click **"New +"** → **"Web Service"**
-3. Connect your GitHub repository
-4. Select the repo `zelda2-main`
-
-### 2.2 Configure Settings
-
-| Setting | Value |
-|---------|-------|
-| Name | `women-safety-backend` |
-| Root Directory | `server` |
-| Environment | `Node` |
-| Build Command | `npm install` |
-| Start Command | `node index.js` |
-
-### 2.3 Environment Variables
-
-Add these in Render dashboard:
+Set these in the Render dashboard (or via a Blueprint). Mark the secrets as
+secret/sync-false; never commit them.
 
 ```
-PORT=5000
-JWT_SECRET=<generate-random-string>
 NODE_ENV=production
+DATABASE_URL=postgresql://...        # Neon pooled connection string
+DB_SSL=true
+JWT_SECRET=<64-char hex>
+B2_KEY_ID=<bucket-scoped key id>
+B2_APPLICATION_KEY=<bucket-scoped application key>
+B2_BUCKET=zeldadb
+B2_REGION=us-east-005
+B2_ENDPOINT=https://s3.us-east-005.backblazeb2.com
+B2_PUBLIC_BASE_URL=
+CORS_ORIGINS=https://zelda-api-kbtl.onrender.com
+CLIENT_URL=https://zelda-api-kbtl.onrender.com
+API_URL=https://zelda-api-kbtl.onrender.com
+EMAIL_FROM=ZELDA <your-verified-sender>
+POLICE_EMAIL=police@guardian.com
 ```
 
-Generate JWT_SECRET:
+Optional: `SENDGRID_API_KEY` for SOS email notifications.
+
+CORS is allow-list based (`server/config/origins.js`). Native mobile clients send
+no `Origin` header and are allowed. Add any Vercel/custom dashboard domain to
+`CORS_ORIGINS` (comma-separated).
+
+## 3. Build and start
+
+```
+Build:  npm ci --omit=dev
+Start:  node server/index.js
+Health: /api/health
+```
+
+`package-lock.json` must be committed for `npm ci`. If you cannot commit it,
+change the build command to `npm install --omit=dev`.
+
+The server refuses to start in production without a real `JWT_SECRET`.
+
+## 4. Database schema
+
+Apply once per Neon database:
+
 ```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+psql "$DATABASE_URL" -f server/sql/schema_neon.sql
 ```
 
-### 2.4 Deploy
+The script is idempotent. It creates `users`, `sos_cases`, `contacts`,
+`user_preferences`, `audit_log`, indexes, and demo accounts
+(`police@guardian.com` / `user@guardian.com`).
 
-Click **"Create Web Service"** and wait for deployment.
+## 5. Deploying the frontend
 
-**Your backend URL**: `https://women-safety-backend.onrender.com`
+The Express server serves `client/dist` with an SPA fallback. Build it before
+starting the server:
 
----
-
-## Step 3: Deploy Frontend to Vercel
-
-### 3.1 Update Configuration Files
-
-The following files have been pre-configured:
-
-- `client/vercel.json` - Vercel rewrite rules
-- `client/.env.production` - Production environment variables
-
-### 3.2 Update Your URLs
-
-**IMPORTANT**: After deploying backend, update these files with your actual URLs:
-
-**File: `client/.env.production`**
-```
-VITE_API_URL=https://women-safety-backend.onrender.com/api
-VITE_MEDIA_URL=https://women-safety-backend.onrender.com
+```bash
+cd client
+npm ci
+npm run build
 ```
 
-**File: `client/vercel.json`**
-```json
-{
-  "rewrites": [
-    { "source": "/api/:path*", "destination": "https://women-safety-backend.onrender.com/api/:path*" },
-    { "source": "/uploads/:path*", "destination": "https://women-safety-backend.onrender.com/uploads/:path*" }
-  ]
-}
-```
-
-**File: `server/index.js`** (Update CORS)
-```javascript
-const corsOptions = {
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'https://your-frontend.vercel.app'  // Replace with your Vercel URL
-    ];
-    // ...
-  }
-};
-```
-
-### 3.3 Deploy to Vercel
-
-1. Log in to **Vercel Dashboard**
-2. Click **"Add New..."** → **"Project"**
-3. Import your GitHub repository
-
-4. Configure:
+To host the dashboard separately on Vercel:
 
 | Setting | Value |
 |---------|-------|
-| Framework Preset | `Vite` |
+| Framework | Vite |
 | Root Directory | `client` |
 | Build Command | `npm run build` |
 | Output Directory | `dist` |
+| `VITE_API_URL` | `https://zelda-api-kbtl.onrender.com/api` |
+| `VITE_MEDIA_URL` | `https://zelda-api-kbtl.onrender.com` |
 
-5. Add Environment Variables:
+Then add the Vercel domain to `CORS_ORIGINS` on Render.
 
+## 6. Verify
+
+```bash
+curl https://zelda-api-kbtl.onrender.com/api/health
+curl https://zelda-api-kbtl.onrender.com/api/health/db
+curl https://zelda-api-kbtl.onrender.com/api/config-status
 ```
-VITE_API_URL=https://women-safety-backend.onrender.com/api
-VITE_MEDIA_URL=https://women-safety-backend.onrender.com
-```
 
-6. Click **"Deploy"**
+Expected:
 
----
+- `/api/health` → `status: ok`, `database: connected`
+- `/api/health/db` → `ok: true`, five tables
+- `/api/config-status` → `database: Connected`, `storage: Configured (b2)`,
+  `jwt: Configured`
 
-## Step 4: Verify Deployment
+## 7. Evidence and filesystem
 
-### Test Your URLs
+SOS video/audio is uploaded to B2, not to Render's ephemeral disk. Uploads are
+written to a temp file, hashed (SHA-256), uploaded to B2, then the temp file is
+removed. Private objects are served through short-lived presigned URLs.
 
-| Service | Test Endpoint |
-|---------|---------------|
-| Backend Health | `https://your-backend.onrender.com/api/health` |
-| Frontend | `https://your-frontend.vercel.app` |
-
-### Demo Accounts
+## 8. Demo accounts
 
 | Role | Email | Password |
 |------|-------|----------|
-| Police | police@guardian.com | police123 |
-| User | user@guardian.com | user123 |
+| Police | `police@guardian.com` | `police123` |
+| User | `user@guardian.com` | `user123` |
 
----
+Change or remove these before a real public launch.
 
-## Important Notes
+## Related docs
 
-### ⚠️ File Upload Limitation
-
-- Render's free tier has **ephemeral filesystem**
-- Uploaded files are deleted when the service sleeps/restarts
-- For production, integrate **AWS S3** or **Cloudinary**
-
-### Updating URLs After Deploy
-
-If you need to update your backend/frontend URLs:
-
-1. **Frontend**: Update Vercel environment variables
-2. **Backend**: Update CORS in `server/index.js` and redeploy
-
----
-
-## Project Structure for Deployment
-
-```
-zelda2-main/
-├── client/                 # Vercel deployment
-│   ├── src/
-│   ├── vercel.json        # Vercel config
-│   ├── .env.production    # Production env
-│   └── package.json
-├── server/                 # Render deployment
-│   ├── routes/
-│   ├── middleware/
-│   ├── data/
-│   ├── index.js
-│   └── package.json
-└── README.md
-```
-
----
-
-## Troubleshooting
-
-### CORS Errors
-- Update `server/index.js` with your Vercel domain in allowedOrigins
-- Redeploy backend on Render
-
-### 404 on API Calls
-- Verify `VITE_API_URL` is correct in Vercel
-- Check backend is running on Render
-
-### Files Not Loading
-- Verify `VITE_MEDIA_URL` is correct
-- Check Render service is active (not sleeping)
-
----
-
-## Support
-
-For issues, check:
-1. Render logs (Dashboard → your service → Logs)
-2. Vercel logs (Dashboard → your project → Logs)
-3. Browser console for errors
+- `NEON_R2_MIGRATION.md` — Neon + B2 setup and verification.
+- `DEPLOY-FREE.md` — free-tier overview (points here).

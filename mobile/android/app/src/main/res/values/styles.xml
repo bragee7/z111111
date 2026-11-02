@@ -15,4 +15,10 @@
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">?android:colorBackground</item>
     </style>
+    <!-- Lock-screen SOS cancel UI: solid black from the very first frame —
+         no white window-preview flash while it inflates over the keyguard. -->
+    <style name="SosAlarmTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>

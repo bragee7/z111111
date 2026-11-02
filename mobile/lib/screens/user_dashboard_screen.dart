@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -6,16 +7,20 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../core/theme.dart';
 import '../core/widgets.dart';
 import '../models/emergency_contact.dart';
+import '../services/power_sos_service.dart';
 import '../services/voice_guard_service.dart';
 import '../state/auth_provider.dart';
 import '../state/contacts_provider.dart';
+import '../state/police_stations_provider.dart';
 import '../state/sos_controller.dart';
+import '../widgets/cancel_sos_button.dart';
 import 'alerts_history_screen.dart';
 
 class UserDashboardScreen extends StatefulWidget {
@@ -26,7 +31,7 @@ class UserDashboardScreen extends StatefulWidget {
 }
 
 class _UserDashboardScreenState extends State<UserDashboardScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _glowController;
   late final Animation<double> _glow;
 
@@ -44,6 +49,7 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
   @override
   void initState() {
     super.initState();
+    VoiceGuardService.flog('route', 'dashboard shown');
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
@@ -51,31 +57,125 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
     _glow = Tween<double>(begin: 0.4, end: 1.0).animate(
       CurvedAnimation(parent: _glowController, curve: Curves.easeInOut),
     );
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<SosController>().init();
-      context.read<ContactsProvider>().fetchContacts();
-      _maybeAutoStartVoice();
-      VoiceGuardService.consumePendingTrigger();
+      _boot();
     });
+  }
+
+  /// Ordered boot: await controller init (prefs/services read) BEFORE the
+  /// voice auto-start check, so the check sees live state instead of stale
+  /// defaults. No SOS trigger/countdown/cancel/recording/send path changed.
+  Future<void> _boot() async {
+    try {
+      await context.read<SosController>().init();
+    } catch (_) {}
+    if (!mounted) return;
+    await _resyncSwitches();
+    if (!mounted) return;
+    // ignore: use_build_context_synchronously
+    context.read<ContactsProvider>().fetchContacts();
+    await _maybeAutoStartVoice();
+    await VoiceGuardService.consumePendingTrigger();
+  }
+
+  /// Resync switch UI from actual prefs/services state. Power has no status
+  /// stream, so a stale controller value (e.g. Off while pref is true after
+  /// an early-returned init) is corrected via the existing setter (idempotent
+  /// pref + native write, no SOS flow touched). Voice is read-only here: ask
+  /// the live engine to re-emit running state and let the controller's
+  /// statusStream listener correct the toggle — never start/stop here.
+  Future<void> _resyncSwitches() async {
+    try {
+      // Re-assert FGS mic promotion on every foreground return (init +
+      // resume): a service auto-started while backgrounded (e.g. after a
+      // reboot) runs UNPROMOTED with its mic muted to zeros until something
+      // promotes it. Idempotent, silent on failure (BG dead or backgrounded).
+      VoiceGuardService.serviceInvoke('promote_to_foreground');
+      final actualPower = await PowerSosService.isEnabled();
+      if (!mounted) return;
+      // ignore: use_build_context_synchronously
+      final sos = context.read<SosController>();
+      if (sos.powerSosEnabled != actualPower) {
+        await VoiceGuardService.flog(
+          'dashboard',
+          'resync power switch UI: controller=${sos.powerSosEnabled} actual=$actualPower',
+        );
+        await sos.setPowerSosEnabled(actualPower);
+      }
+      // Voice toggle self-corrects via SosController's statusStream; just
+      // re-query so a pre-subscribe ENGINE-UP is not lost on resume.
+      VoiceGuardService.serviceInvoke('query_status');
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _resyncSwitches();
+    }
+  }
+
+  /// Presentation-layer copy fix: the controller/executor report a generic
+  /// "check your connection" string for ALL send failures, including server
+  /// 5xx where the phone's connection is fine. Rewrite to neutral wording
+  /// that is accurate for both cases. Same AppBanner widget, no flow change.
+  String _displayError(String raw) {
+    if (raw.contains('check your connection')) {
+      return 'Could not send emergency alert. Please try again. '
+          'If it keeps failing, check your connection or try again later.';
+    }
+    return raw;
   }
 
   Future<void> _maybeAutoStartVoice() async {
     final user = context.read<AuthProvider>().user;
     if (user == null || user.role == 'police') return;
-    if (context.read<SosController>().voiceEnabled) return;
-
-    final mic = await Permission.microphone.request();
-    await Permission.notification.request();
+    // Heal ACTUAL state, not just the flag: the engine may be dead while the
+    // flag reads ON (e.g. logout cleared prefs), or the flag may be stale
+    // while the engine runs. The statusStream listener self-corrects the flag
+    // when running, so only a dead engine needs action here.
+    final running = await VoiceGuardService.isRunning();
     if (!mounted) return;
-    if (mic.isGranted) {
-      await context.read<SosController>().setVoiceEnabled(true);
-    } else if (await VoiceGuardService.wasEnabled()) {
-      await VoiceGuardService.restartIfNeeded();
+    final rawPref = await VoiceGuardService.getEnabledPrefRaw();
+    if (!mounted) return;
+    // ignore: use_build_context_synchronously
+    final controllerOn = context.read<SosController>().voiceEnabled;
+    await VoiceGuardService.flog('dashboard',
+        'auto-start check: running=$running rawPref=$rawPref flag=$controllerOn');
+    if (running) {
+      // Heal: a live isolate may be engine-down (a post-stop reboot lands in
+      // STANDBY and never boots the engine). Boot unless explicitly off; the
+      // handler no-ops (re-affirms status) when the engine is already up.
+      if (rawPref == null || rawPref) {
+        await VoiceGuardService.flog('dashboard',
+            'auto-start: service alive, requesting promote + engine boot check');
+        // Promote FIRST: an unpromoted service (reboot auto-start in
+        // background) has its mic muted to zeros; boot_engine alone cannot
+        // revive capture. Dashboard init runs foreground ⇒ allowed.
+        VoiceGuardService.serviceInvoke('promote_to_foreground');
+        VoiceGuardService.serviceInvoke('boot_engine');
+      }
+      return;
+    }
+    // Start unless the user EXPLICITLY disabled voice (pref false AND flag
+    // off). Covers fresh install (null), login-restore (true), and the
+    // stale-flag heal case (flag on, engine dead).
+    if (rawPref == null || rawPref || controllerOn) {
+      final mic = await Permission.microphone.request();
+      await Permission.notification.request();
+      if (!mounted) return;
+      if (mic.isGranted) {
+        await context.read<SosController>().setVoiceEnabled(true);
+      } else if (await VoiceGuardService.wasEnabled()) {
+        await VoiceGuardService.restartIfNeeded();
+      }
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _glowController.dispose();
     _nameController.dispose();
     _phoneController.dispose();
@@ -83,9 +183,22 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
     super.dispose();
   }
 
+  /// Stashes the EFFECTIVE protection state before logout clears it, so
+  /// login can restore the user's choice (fresh installs default to ON).
+  Future<void> _stashProtectionPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final voiceRaw = await VoiceGuardService.getEnabledPrefRaw();
+      await prefs.setBool(VoiceGuardService.preLogoutKey, voiceRaw ?? true);
+      await prefs.setBool(
+          PowerSosService.preLogoutKey, await PowerSosService.isEnabled());
+    } catch (_) {}
+  }
+
   Future<void> _handleLogout(BuildContext context) async {
     final sos = context.read<SosController>();
     final auth = context.read<AuthProvider>();
+    await _stashProtectionPrefs();
     await sos.setVoiceEnabled(false);
     await sos.setPowerSosEnabled(false);
     await auth.logout();
@@ -192,7 +305,7 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to save contact')),
+        SnackBar(content: Text('Failed to save contact: $e')),
       );
     }
   }
@@ -216,13 +329,27 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
       ),
     );
     if (confirmed == true) {
-      await contacts.remove(id);
+      if (!mounted) return;
+      try {
+        await contacts.remove(id);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete contact: $e')),
+        );
+      }
     }
   }
 
   Future<void> _saveFile(String path, String label) async {
     final file = File(path);
-    if (!await file.exists()) return;
+    if (!await file.exists()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Recording file not found on this device')),
+      );
+      return;
+    }
     await SharePlus.instance.share(
       ShareParams(
         files: [XFile(path, mimeType: 'video/mp4')],
@@ -273,7 +400,7 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
                         const SizedBox(height: 16),
                         if (sos.error.isNotEmpty) ...[
                           AppBanner(
-                            message: sos.error,
+                            message: _displayError(sos.error),
                             isError: true,
                             onDismiss: sos.dismissError,
                           ),
@@ -296,6 +423,8 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
                           const SizedBox(height: 16),
                           _buildLocationCard(sos),
                         ],
+                        const SizedBox(height: 16),
+                        _buildPoliceStationsCard(context),
                         const SizedBox(height: 16),
                         _buildContactsCard(context, contacts),
                         const SizedBox(height: 16),
@@ -419,10 +548,11 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
             ],
           ),
           const SizedBox(height: 12),
-          if (sos.status == SosStatus.cancelWindow)
+          // One merged cancel view drives both statuses (cancelWindow is a
+          // legacy mirror state only): a single 5s countdown, then recording.
+          if (sos.status == SosStatus.cancelWindow ||
+              sos.status == SosStatus.countdown)
             _buildCancelWindow(sos)
-          else if (sos.status == SosStatus.countdown)
-            _buildCountdown(sos)
           else if (sos.status == SosStatus.recording)
             _buildRecording(sos)
           else if (sos.status == SosStatus.sending)
@@ -453,67 +583,99 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
     }
   }
 
+  /// Zelda Emergency SOS cancel countdown — styled after the Android
+  /// Emergency SOS reference: dark card, title, big live countdown in a
+  /// coral ring, prominent red Cancel SOS button. The SOS is ALREADY
+  /// triggered, so there is no "start" action anywhere here — only cancel.
   Widget _buildCancelWindow(SosController sos) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 16),
+    final seconds = sos.cancelTimer ?? sos.countdown ?? 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.red500, width: 1.5),
+      ),
       child: Column(
         children: [
-          Text(
-            '${sos.cancelTimer ?? 0}',
-            style: const TextStyle(
-              fontSize: 64,
-              fontWeight: FontWeight.bold,
-              color: AppColors.orange500,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'SOS will be sent in ${sos.cancelTimer ?? 0} seconds',
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 18, color: Colors.white),
-          ),
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: sos.cancelSOS,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.gray700,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 18),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  side: const BorderSide(color: AppColors.red500, width: 2),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.sos, color: AppColors.red500, size: 28),
+              SizedBox(width: 10),
+              Text(
+                'SOS Alert Active',
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
                 ),
               ),
-              child: const Text(
-                '✕ CANCEL SOS',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Your emergency alert has been triggered.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 15, color: AppColors.gray300),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Emergency assistance will be requested when the countdown ends.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14, color: AppColors.gray400),
+          ),
+          const SizedBox(height: 12),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Your phone will:',
+              style: TextStyle(fontSize: 16, color: AppColors.gray300),
+            ),
+          ),
+          const SizedBox(height: 6),
+          const Row(
+            children: [
+              Icon(Icons.check, color: Colors.green, size: 20),
+              SizedBox(width: 10),
+              Text(
+                'Send SOS + record evidence',
+                style: TextStyle(fontSize: 17, color: Colors.white),
+              ),
+            ],
+          ),
+          const SizedBox(height: 28),
+          Container(
+            width: 210,
+            height: 210,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: const Color(0xFFEF6C5B),
+                width: 8,
+              ),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              '$seconds',
+              style: const TextStyle(
+                fontSize: 84,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCountdown(SosController sos) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24),
-      child: Column(
-        children: [
+          const SizedBox(height: 16),
           Text(
-            '${sos.countdown ?? 0}',
-            style: const TextStyle(
-              fontSize: 72,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
+            'SOS will be sent in ${seconds}s',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 15, color: AppColors.gray300),
           ),
-          const Text(
-            'Get Ready!',
-            style: TextStyle(fontSize: 20, color: Colors.white),
-          ),
+          const SizedBox(height: 20),
+          // Prominent, always-visible TAP-to-cancel control — the countdown
+          // cannot be dismissed by gesture or rebuild; only this button
+          // cancels, and it ignores taps while a cancel request is in flight.
+          CancelSosButton(onPressed: sos.cancelSOS, busy: sos.isCancelling),
         ],
       ),
     );
@@ -553,6 +715,16 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
             'Recording your emergency situation...',
             style: TextStyle(color: AppColors.gray400),
           ),
+          const SizedBox(height: 16),
+          // Cancel affordance during recording: the executor honors
+          // command=cancel in every recording phase (poll, app-report,
+          // native-recording) and cancelSOS() stops the camera for the
+          // local path, so this is a pure UI addition — no lifecycle change.
+          // Same shared tap-to-cancel control as the countdown card.
+          CancelSosButton(
+            onPressed: () => sos.cancelSOS(),
+            busy: sos.isCancelling,
+          ),
         ],
       ),
     );
@@ -582,39 +754,48 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
   }
 
   Widget _buildVoiceBanner(SosController sos) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.green900.withValues(alpha: 0.4),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.green500,
-            ),
+    return ValueListenableBuilder<bool>(
+      valueListenable: VoiceGuardService.micDegraded,
+      builder: (context, micDegraded, _) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: (micDegraded ? Colors.amber.shade900 : AppColors.green900)
+                .withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(12),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              sos.voiceEnabled
-                  ? 'Voice Protection Active - Listening for loud sounds & whistle'
-                  : '24/7 Voice Protection Off',
-              style: const TextStyle(color: AppColors.green400, fontSize: 13),
-            ),
+          child: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: micDegraded ? Colors.amber : AppColors.green500,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  sos.voiceEnabled
+                      ? (micDegraded
+                          ? 'Voice detection paused - open ZELDA to restore microphone access'
+                          : 'Voice Protection Active - Listening for "help me"')
+                      : '24/7 Voice Protection Off',
+                  style: const TextStyle(
+                      color: AppColors.green400, fontSize: 13),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Switch(
+                value: sos.voiceEnabled,
+                activeThumbColor: AppColors.green500,
+                onChanged: (v) => _toggleVoice(sos, v),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          Switch(
-            value: sos.voiceEnabled,
-            activeThumbColor: AppColors.green500,
-            onChanged: (v) => _toggleVoice(sos, v),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -811,6 +992,84 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
     );
   }
 
+  Widget _buildPoliceStationsCard(BuildContext context) {
+    final ps = context.watch<PoliceStationsProvider>();
+    final count = ps.all.isEmpty ? '—' : '${ps.all.length}';
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.policeBlue,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Police Stations',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  '$count stations',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Find the nearest police station, see the route, and get '
+            'turn-by-turn directions to the control room.',
+            style: TextStyle(color: AppColors.gray300, fontSize: 13),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pushNamed(context, '/police-stations');
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: AppColors.policeBlue,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  icon: const Icon(Icons.map_outlined, size: 19),
+                  label: const Text(
+                    'Open station map',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildLocationCard(SosController sos) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -893,6 +1152,21 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
           ),
           const SizedBox(height: 12),
           if (_showAddContact) _buildContactForm(contacts),
+          if (contacts.error.isNotEmpty) ...[
+            AppBanner(
+              message: contacts.error,
+              isError: true,
+              onDismiss: contacts.dismissError,
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: OutlinedButton.icon(
+                onPressed: contacts.isLoading ? null : contacts.fetchContacts,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Retry'),
+              ),
+            ),
+          ],
           if (contacts.isLoading)
             const Padding(
               padding: EdgeInsets.all(24),
@@ -1276,7 +1550,7 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
                 child: _howItWorksStep('1', AppColors.blue600, 'Voice recognition is always active in background'),
               ),
               Expanded(
-                child: _howItWorksStep('2', AppColors.orange600, 'Whistle or scream loudly'),
+                child: _howItWorksStep('2', AppColors.orange600, 'Say "help me" — SOS fires even with the app closed'),
               ),
               Expanded(
                 child: _howItWorksStep('3', AppColors.red600, '30-second recording will be sent to police'),
@@ -1289,66 +1563,7 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
   }
 
   Widget _buildVoicePhrasesSettings() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppColors.gray800,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Voice Sound Triggers',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: Colors.white),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Detected on-device with sound analysis (no AI, works offline).',
-            style: TextStyle(fontSize: 13, color: Colors.grey),
-          ),
-          const SizedBox(height: 16),
-          _soundTriggerRow(
-            Icons.campaign,
-            'Whistle',
-            'A deliberate whistle, held about 1 second',
-          ),
-          const SizedBox(height: 8),
-          _soundTriggerRow(
-            Icons.volume_up,
-            'Loud sound',
-            'A sustained scream-level blast',
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _soundTriggerRow(IconData icon, String title, String subtitle) {
-    return Row(
-      children: [
-        Icon(icon, color: AppColors.green400, size: 22),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white),
-              ),
-              Text(
-                subtitle,
-                style: const TextStyle(fontSize: 13, color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
+    return const _TriggerWordsCard();
   }
 
   Widget _howItWorksStep(String number, Color color, String text) {
@@ -1439,6 +1654,153 @@ class _UserDashboardScreenState extends State<UserDashboardScreen>
   }
 }
 
+class _TriggerWordsCard extends StatefulWidget {
+  const _TriggerWordsCard();
+
+  @override
+  State<_TriggerWordsCard> createState() => _TriggerWordsCardState();
+}
+
+class _TriggerWordsCardState extends State<_TriggerWordsCard> {
+  final _controller = TextEditingController();
+  List<String> _words = const ['Help me'];
+  bool _loading = true;
+  bool _saving = false;
+  String? _message;
+  bool _messageOk = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final words = await VoiceGuardService.getTriggerWords();
+    if (!mounted) return;
+    setState(() {
+      _words = words;
+      _controller.text = words.join(', ');
+      _loading = false;
+    });
+  }
+
+  Future<void> _save() async {
+    final parts = _controller.text
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) {
+      setState(() {
+        _message = 'Enter at least one word.';
+        _messageOk = false;
+      });
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _message = null;
+    });
+    final result = await VoiceGuardService.setTriggerWords(parts);
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      _words = result.words;
+      _controller.text = result.words.join(', ');
+      _message = result.message;
+      _messageOk = result.ok;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.gray800,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Trigger Words',
+            style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: Colors.white),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _loading
+                ? 'Loading…'
+                : 'Say ${_words.map((w) => '"$w"').join(' or ')} — SOS fires even with the app closed.',
+            style: const TextStyle(fontSize: 13, color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _controller,
+            enabled: !_loading && !_saving,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'help me',
+              hintStyle: const TextStyle(color: Colors.grey),
+              filled: true,
+              fillColor: AppColors.gray900,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Separate multiple words with commas (max 3). Common English works best.',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: (_loading || _saving) ? null : _save,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.green500,
+              foregroundColor: Colors.white,
+            ),
+            child: _saving
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Text('Save trigger word'),
+          ),
+          if (_message != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _message!,
+              style: TextStyle(
+                fontSize: 13,
+                color: _messageOk ? AppColors.green400 : Colors.orange,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _VideoPreview extends StatefulWidget {
   final String path;
   const _VideoPreview({required this.path});
@@ -1455,9 +1817,10 @@ class _VideoPreviewState extends State<_VideoPreview> {
     super.initState();
     _controller = VideoPlayerController.file(File(widget.path));
     _controller!.initialize().then((_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
       _controller!.setLooping(true);
-    });
+      setState(() {});
+    }, onError: (_) {});
   }
 
   @override
@@ -1519,21 +1882,23 @@ class _AudioPreview extends StatefulWidget {
 
 class _AudioPreviewState extends State<_AudioPreview> {
   final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<PlayerState>? _stateSub;
   bool _playing = false;
 
   @override
   void initState() {
     super.initState();
-    _player.onPlayerStateChanged.listen((state) {
+    _stateSub = _player.onPlayerStateChanged.listen((state) {
       if (mounted) setState(() => _playing = state == PlayerState.playing);
     });
     _player.setSourceDeviceFile(widget.path).then((_) {
       if (mounted) _player.resume();
-    });
+    }, onError: (_) {});
   }
 
   @override
   void dispose() {
+    _stateSub?.cancel();
     _player.dispose();
     super.dispose();
   }

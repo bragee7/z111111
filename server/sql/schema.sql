@@ -1,5 +1,10 @@
 -- Zelda Women Safety Guardian - Database Schema
--- MySQL / MariaDB compatible
+-- *** STALE / HISTORICAL — DO NOT USE FOR NEW SETUPS ***
+-- This file is legacy MySQL / MariaDB DDL and is NOT the live schema.
+-- Live database is Postgres (see server/db.js pg Pool); the authoritative
+-- live DDL is the migration set in this directory (server/sql/),
+-- e.g. migration_20260822_nearest_police_station.sql. Apply migrations
+-- against DATABASE_URL instead of this file.
 
 CREATE DATABASE IF NOT EXISTS zelda_new CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE zelda_new;

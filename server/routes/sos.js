@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { authMiddleware } = require('../middleware/auth');
 const { query, auditLog } = require('../db');
-const { supabase, MEDIA_BUCKET } = require('../supabase');
+const storage = require('../storage');
 const { emitNewCase, emitCaseUpdated } = require('../socket');
 const emailService = require('../services/email');
 const { findNearestPoliceStation } = require('../services/policeStationService');
@@ -31,7 +31,9 @@ const upload = multer({
     if (allowedMime.test(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only video and audio files are allowed'));
+      const err = new Error('Only video and audio files are allowed');
+      err.status = 400;
+      cb(err);
     }
   }
 });
@@ -41,7 +43,9 @@ const handleMulterError = (err, req, res, next) => {
     return res.status(400).json({ error: `Upload error: ${err.message}` });
   }
   if (err) {
-    return res.status(500).json({ error: `Upload error: ${err.message}` });
+    // fileFilter rejections (e.g. non-video/audio) carry status 400; unknown upload errors stay 500
+    const status = err.status === 400 || err.statusCode === 400 || err.message === 'Only video and audio files are allowed' ? 400 : 500;
+    return res.status(status).json({ error: `Upload error: ${err.message}` });
   }
   next();
 };
@@ -58,9 +62,8 @@ const extname = (mimetype) => {
 
 const uploadMedia = async (file) => {
   if (!file) return null;
-  if (!supabase) return null;
+
   const fileName = `${uuidv4()}${extname(file.mimetype)}`;
-  const fileSize = file.size || 0;
 
   let sha256 = null;
   try {
@@ -68,35 +71,33 @@ const uploadMedia = async (file) => {
     sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   } catch (_) {}
 
-  // Fail-OPEN: a storage blip must never lose a victim alert.
-  try {
-    const { error } = await supabase.storage
-      .from(MEDIA_BUCKET)
-      .upload(fileName, fs.createReadStream(file.path), {
-        contentType: file.mimetype,
-        upsert: false,
-        duplex: fileSize > 0 ? 'half' : undefined
-      });
-
-    try { fs.unlink(file.path, () => {}); } catch (_) {}
-
-    if (error) {
-      console.error('[sos] media upload failed (fail-open, case still created):', error.message || error);
-      return null;
-    }
-
-    const { data } = supabase.storage
-      .from(MEDIA_BUCKET)
-      .getPublicUrl(fileName);
-
-    return { publicUrl: data.publicUrl, sha256 };
-  } catch (err) {
-    console.error('[sos] media upload threw (fail-open, case still created):', err && err.message ? err.message : err);
+  if (!storage.isConfigured()) {
     try { fs.unlink(file.path, () => {}); } catch (_) {}
     return null;
   }
-};
 
+  // Fail-OPEN: a storage blip must never lose a victim alert - log + return null so the SOS case is still created.
+  try {
+    const publicUrl = await storage.upload(file, fileName);
+
+    try {
+      fs.unlink(file.path, () => {});
+    } catch (_) {}
+
+    if (!publicUrl) {
+      console.error('[sos] media upload failed (fail-open, case still created)');
+      return null;
+    }
+
+    return { publicUrl, sha256 };
+  } catch (err) {
+    console.error('[sos] media upload threw (fail-open, case still created):', err && err.message ? err.message : err);
+    try {
+      fs.unlink(file.path, () => {});
+    } catch (_) {}
+    return null;
+  }
+};
 const notifySOS = async (caseForEmail, videoUrl, audioUrl, userId) => {
   try {
     const emailResult = await emailService.sendSOSAlert(caseForEmail, videoUrl, audioUrl);
@@ -156,8 +157,8 @@ router.post('/', authMiddleware, (req, res, next) => {
 
     const videoMedia = await uploadMedia(videoFile);
     const audioMedia = await uploadMedia(audioFile);
-    const videoUrl = videoMedia ? videoMedia.publicUrl : null;
-    const audioUrl = audioMedia ? audioMedia.publicUrl : null;
+    const videoRef = videoMedia ? videoMedia.publicUrl : null;
+    const audioRef = audioMedia ? audioMedia.publicUrl : null;
     const videoSha256 = videoMedia ? videoMedia.sha256 : null;
     const audioSha256 = audioMedia ? audioMedia.sha256 : null;
 
@@ -194,8 +195,8 @@ router.post('/', authMiddleware, (req, res, next) => {
           lngValue,
           'Pending',
           notes || '',
-          videoUrl,
-          audioUrl,
+          videoRef,
+          audioRef,
           videoSha256,
           audioSha256,
           'manual',
@@ -218,7 +219,7 @@ router.post('/', authMiddleware, (req, res, next) => {
         result = await query(
           `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
-          [req.user.userId, req.user.email, locValue, latValue, lngValue, 'Pending', notes || '', videoUrl, audioUrl, videoSha256, audioSha256, 'manual', createdAt, updatedAt]
+          [req.user.userId, req.user.email, locValue, latValue, lngValue, 'Pending', notes || '', videoRef, audioRef, videoSha256, audioSha256, 'manual', createdAt, updatedAt]
         );
         station = null;
       } else { throw e; }
@@ -237,6 +238,13 @@ router.post('/', authMiddleware, (req, res, next) => {
       notes: notes || '',
       created_at: createdAt
     };
+
+    // Resolve once for the email/socket payload. The database keeps the durable
+    // reference (b2://...) and every API read signs a fresh URL.
+    const [videoUrl, audioUrl] = await Promise.all([
+      storage.resolveUrl(videoRef, 7 * 24 * 60 * 60),
+      storage.resolveUrl(audioRef, 7 * 24 * 60 * 60)
+    ]);
 
     notifySOS(caseForEmail, videoUrl, audioUrl, req.user.userId);
 
@@ -278,7 +286,7 @@ router.post('/', authMiddleware, (req, res, next) => {
   }
 });
 
-const mapCase = (c) => ({
+const mapCase = async (c) => ({
   id: c.id,
   userId: c.user_id,
   userEmail: c.user_email,
@@ -287,8 +295,8 @@ const mapCase = (c) => ({
   longitude: c.longitude,
   status: c.status,
   notes: c.notes,
-  videoUrl: c.video_url,
-  audioUrl: c.audio_url,
+  videoUrl: await storage.resolveUrl(c.video_url),
+  audioUrl: await storage.resolveUrl(c.audio_url),
   videoSha256: c.video_sha256,
   audioSha256: c.audio_sha256,
   triggerType: c.trigger_type,
@@ -316,14 +324,14 @@ router.get('/', authMiddleware, async (req, res) => {
       cases = await query('SELECT * FROM sos_cases WHERE user_id = $1 ORDER BY created_at DESC', [req.user.userId]);
     }
 
-    res.json({ cases: cases.map(mapCase) });
+    res.json({ cases: await Promise.all(cases.map(mapCase)) });
   } catch (error) {
     console.error('Get cases error:', error);
     res.status(500).json({ error: 'Error fetching cases' });
   }
 });
 
-router.get('/test-email', async (req, res) => {
+router.get('/test-email', authMiddleware, async (req, res) => {
   try {
     const result = await emailService.sendTestEmail();
     if (result.success) {
@@ -363,7 +371,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    res.json({ case: mapCase(caseData) });
+    res.json({ case: await mapCase(caseData) });
   } catch (error) {
     console.error('Get case error:', error);
     res.status(500).json({ error: 'Error fetching case' });
@@ -462,7 +470,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
 
     const updatedCases = await query('SELECT * FROM sos_cases WHERE id = $1', [req.params.id]);
 
-    const mappedCase = mapCase(updatedCases[0]);
+    const mappedCase = await mapCase(updatedCases[0]);
 
     emitCaseUpdated(mappedCase);
 

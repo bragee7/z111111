@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { pool, query, auditLog } = require('../db');
 const { authMiddleware, requireAdmin } = require('../middleware/auth');
-const { supabase, MEDIA_BUCKET } = require('../supabase');
+const storage = require('../storage');
 const { generateGuardianEmail } = require('./auth');
 
 const router = express.Router();
@@ -21,7 +21,7 @@ const mapUser = (u) => ({
   updatedAt: u.updated_at
 });
 
-const mapCase = (c) => ({
+const mapCase = async (c) => ({
   id: c.id,
   userId: c.user_id,
   userEmail: c.user_email,
@@ -33,8 +33,8 @@ const mapCase = (c) => ({
   caseType: c.case_type,
   assignedOfficer: c.assigned_officer,
   notes: c.notes,
-  videoUrl: c.video_url,
-  audioUrl: c.audio_url,
+  videoUrl: await storage.resolveUrl(c.video_url),
+  audioUrl: await storage.resolveUrl(c.audio_url),
   triggerType: c.trigger_type,
   timestamp: c.created_at,
   createdAt: c.created_at,
@@ -66,29 +66,23 @@ const mapContact = (c) => ({
 });
 
 const deleteUserMedia = async (caseRows) => {
-  if (!supabase) return;
+  if (!storage.isConfigured()) return;
   const fileNames = new Set();
 
   for (const c of caseRows) {
     for (const url of [c.video_url, c.audio_url]) {
       if (!url) continue;
       try {
-        const clean = String(url).split('?')[0];
-        const fileName = clean.split('/').pop();
-        if (fileName) fileNames.add(fileName);
+        const key = storage.keyFromReference(url);
+        if (key) fileNames.add(key);
       } catch (_) {}
     }
   }
 
   if (fileNames.size === 0) return;
 
-  await supabase.storage
-    .from(MEDIA_BUCKET)
-    .remove([...fileNames])
-    .then(() => {})
-    .catch((err) => console.error('Media deletion error:', err.message));
+  await storage.remove([...fileNames]);
 };
-
 router.get('/stats/overview', async (req, res) => {
   try {
     const totalUsers = await query('SELECT COUNT(*)::int AS count FROM users');
@@ -471,7 +465,7 @@ router.get('/cases', async (req, res) => {
       [...params, size, offset]
     );
 
-    res.json({ total, page, size, cases: rows.map(mapCase) });
+    res.json({ total, page, size, cases: await Promise.all(rows.map(mapCase)) });
   } catch (error) {
     console.error('Admin cases error:', error);
     res.status(500).json({ error: 'Error fetching cases' });
@@ -487,7 +481,7 @@ router.get('/cases/:id', async (req, res) => {
       return res.status(404).json({ error: 'Case not found' });
     }
 
-    res.json({ case: mapCase(caseData) });
+    res.json({ case: await mapCase(caseData) });
   } catch (error) {
     console.error('Admin get case error:', error);
     res.status(500).json({ error: 'Error fetching case' });
@@ -536,7 +530,7 @@ router.put('/cases/:id', async (req, res) => {
     );
 
     const updated = await query('SELECT * FROM sos_cases WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Case updated successfully', case: mapCase(updated[0]) });
+    res.json({ message: 'Case updated successfully', case: await mapCase(updated[0]) });
   } catch (error) {
     console.error('Admin update case error:', error);
     res.status(500).json({ error: 'Error updating case' });

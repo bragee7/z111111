@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'sos_executor.dart';
+
 /// Dart side of the 3x-power-press SOS guard.
 ///
 /// Killed-state path is fully native (PowerGuardService + PowerPressReceiver):
@@ -20,6 +22,9 @@ class PowerSosService {
   /// Must match PowerPressReceiver.PENDING_KEY / ENABLED_KEY.
   static const pendingKey = 'zelda_power_sos_trigger';
   static const enabledKey = 'zelda_power_sos_enabled';
+
+  /// Key stashing the pre-logout power-SOS flag so login can restore it.
+  static const preLogoutKey = 'zelda_power_sos_enabled_prelogout';
 
   /// Pending triggers older than this are stale (e.g. consumed late).
   static const freshnessWindow = Duration(seconds: 60);
@@ -66,6 +71,17 @@ class PowerSosService {
       await prefs.remove(pendingKey);
       final age = DateTime.now().millisecondsSinceEpoch - ts;
       if (age < 0 || age > freshnessWindow.inMilliseconds) return false;
+      // A press that predates the confirmed cancellation is a replay, not a
+      // new SOS. A press after the cancel (ts > cancelledAt) still works.
+      final cancelledAt = prefs.getInt(SosExecutor.cancelledAtKey) ?? 0;
+      final session = (prefs.getString(SosExecutor.sessionIdKey) ?? '').trim();
+      final cancelledSession =
+          (prefs.getString(SosExecutor.cancelledSessionIdKey) ?? '').trim();
+      final replayOfCancelled =
+          cancelledAt > 0 &&
+          (session.isEmpty || session == cancelledSession) &&
+          ts <= cancelledAt;
+      if (replayOfCancelled) return false;
       if (!_detectionController.isClosed) _detectionController.add(null);
       return true;
     } catch (_) {

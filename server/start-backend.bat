@@ -1,3 +1,3 @@
 @echo off
-cd /d "C:\Users\Gauth\Documents\project_br\zdb\server"
+cd /d "%~dp0"
 "C:\Program Files\nodejs\node.exe" index.js

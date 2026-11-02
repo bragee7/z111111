@@ -11,13 +11,21 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- Lock-screen SOS cancel UI: lets the alarm activity start from the
+         background over the keyguard (system-SOS style). User grants once. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
 
     <application
-        android:label="ZELDA"
+        android:label="ZELDAv2"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
@@ -51,6 +59,24 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="3x power-press SOS trigger detection"/>
         </service>
+        <!-- Background SOS evidence recorder: CameraX video (audio fallback).
+             Camera + mic FGS types are mandatory for background recording. -->
+        <service
+            android:name=".SosRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone"
+            android:stopWithTask="false"/>
+        <!-- Full-screen SOS cancel UI over home/lock screen (FSI target). -->
+        <activity
+            android:name=".SosAlarmActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"
+            android:theme="@style/SosAlarmTheme"/>
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
@@ -63,7 +89,7 @@
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:exported="false"
-            android:foregroundServiceType="microphone"
+            android:foregroundServiceType="microphone|location"
             android:stopWithTask="false"
             tools:replace="android:exported"/>
         <!-- Don't delete the meta-data below.

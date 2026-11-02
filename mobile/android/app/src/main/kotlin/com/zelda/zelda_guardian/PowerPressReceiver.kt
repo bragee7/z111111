@@ -26,6 +26,10 @@ class PowerPressReceiver : BroadcastReceiver() {
         // prefixed form or Dart reads null (pending trigger never consumed).
         const val PENDING_KEY = "flutter.zelda_power_sos_trigger"
         const val ENABLED_KEY = "flutter.zelda_power_sos_enabled"
+        // Wakes the native SOS coordinator (PowerGuardService poller). The
+        // Dart voice engine writes the same key on keyword detection.
+        const val ALARM_REQUEST_KEY = "flutter.zelda_sos_alarm_request"
+        const val SOURCE_KEY = "flutter.zelda_sos_source"
         private const val ACTION_TRIGGER = "com.zelda.zelda_guardian.POWER_SOS_TRIGGER"
 
         private val pressTimes = ArrayDeque<Long>()
@@ -67,6 +71,13 @@ class PowerPressReceiver : BroadcastReceiver() {
                 // Stash pending trigger for Dart to consume on next start.
                 context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     .edit().putLong(PENDING_KEY, System.currentTimeMillis()).apply()
+                // Wake the native SOS coordinator even when every Dart isolate
+                // is dead: PowerGuardService polls this key and runs the
+                // 5s cancel window + alarm UI natively (no app open needed).
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit().putLong(ALARM_REQUEST_KEY, System.currentTimeMillis())
+                    .putString(SOURCE_KEY, "power-button")
+                    .apply()
                 // Notify the guard service (foreground) to post the alarm.
                 val trigger = Intent(context, PowerGuardService::class.java).apply {
                     this.action = ACTION_TRIGGER

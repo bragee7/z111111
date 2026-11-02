@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { query, auditLog } = require('../db');
+const storage = require('../storage');
 const { JWT_SECRET, authMiddleware } = require('../middleware/auth');
 const emailService = require('../services/email');
 
@@ -13,9 +14,19 @@ const generateOTP = () => {
 
 const OTP_EXPIRY_MINUTES = 5;
 
-const generateGuardianEmail = async (name) => {
-  let base = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+const buildGuardianBase = (name) => {
+  let base = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!base || base.length < 3) base = 'user';
+  return base;
+};
+
+// users.email has a UNIQUE constraint (see server/sql/schema.sql `Email UNIQUE`;
+// Postgres reports it as code 23505, MySQL as ER_DUP_ENTRY/1062).
+// A SELECT-then-INSERT can never be race-free under concurrency, so callers
+// must treat this as best-effort candidate generation and retry the
+// INSERT/UPDATE on unique-violation with a fresh suffix (see register below).
+const generateGuardianEmail = async (name) => {
+  const base = buildGuardianBase(name);
 
   let guardianEmail = base + '@guardian.com';
   const existing = await query('SELECT * FROM users WHERE email = $1', [guardianEmail]);
@@ -28,6 +39,32 @@ const generateGuardianEmail = async (name) => {
   }
 
   return base + Date.now() + '@guardian.com';
+};
+
+// Retryable only when the violated constraint is users.email. A violation on
+// personal_email means a real duplicate registration and must NOT be retried
+// with a new guardian email.
+const isEmailUniqueViolation = (error) => {
+  if (!error) return false;
+  if (error.code === '23505') {
+    const detail = String(error.detail || '').toLowerCase();
+    const constraint = String(error.constraint || '').toLowerCase();
+    if (detail.includes('personal_email') || constraint.includes('personal_email')) return false;
+    return true;
+  }
+  if (error.code === 'ER_DUP_ENTRY' || error.errno === 1062) {
+    const msg = String(error.message || '').toLowerCase();
+    if (msg.includes('personal_email') || msg.includes('personalemail')) return false;
+    return true;
+  }
+  return false;
+};
+
+// Fresh candidate that does not require a SELECT round-trip; used only after
+// a unique-violation proves the best-effort candidate collided.
+const freshGuardianEmailOnCollision = (name, attempt) => {
+  const base = buildGuardianBase(name);
+  return `${base}${Date.now()}${attempt}${Math.floor(Math.random() * 1000)}@guardian.com`;
 };
 
 router.get('/me', authMiddleware, async (req, res) => {
@@ -139,6 +176,12 @@ router.get('/me/export', authMiddleware, async (req, res) => {
       [userId]
     );
 
+    const exportedCases = await Promise.all(cases.map(async (c) => ({
+      ...c,
+      video_url: await storage.resolveUrl(c.video_url),
+      audio_url: await storage.resolveUrl(c.audio_url)
+    })));
+
     res.json({
       exportedAt: new Date().toISOString(),
       profile: {
@@ -151,7 +194,7 @@ router.get('/me/export', authMiddleware, async (req, res) => {
         createdAt: user.created_at,
         updatedAt: user.updated_at
       },
-      cases,
+      cases: exportedCases,
       contacts
     });
   } catch (error) {
@@ -180,14 +223,29 @@ router.post('/register', async (req, res) => {
         return res.status(400).json({ error: 'This personal email is already registered. Please login with your Guardian ID.' });
       }
 
-      const newGuardianEmail = await generateGuardianEmail(name);
+      let newGuardianEmail = await generateGuardianEmail(name);
       const otp = generateOTP();
       const otpExpiry = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+      const hashedReRegPassword = await bcrypt.hash(password, 10);
 
-      await query(
-        'UPDATE users SET name = $1, email = $2, password = $3, role = $4, updated_at = now(), otp = $5, otp_expiry = $6 WHERE id = $7',
-        [name, newGuardianEmail, await bcrypt.hash(password, 10), 'user', otp, otpExpiry, existingPersonalUser.id]
-      );
+      // Collision-safe: concurrent same-name re-registers may pick the same
+      // candidate email; on users.email unique-violation retry with a fresh suffix.
+      let reRegUpdated = false;
+      for (let attempt = 0; attempt < 6 && !reRegUpdated; attempt++) {
+        try {
+          await query(
+            'UPDATE users SET name = $1, email = $2, password = $3, role = $4, updated_at = now(), otp = $5, otp_expiry = $6 WHERE id = $7',
+            [name, newGuardianEmail, hashedReRegPassword, 'user', otp, otpExpiry, existingPersonalUser.id]
+          );
+          reRegUpdated = true;
+        } catch (err) {
+          if (isEmailUniqueViolation(err) && attempt < 5) {
+            newGuardianEmail = freshGuardianEmailOnCollision(name, attempt);
+            continue;
+          }
+          throw err;
+        }
+      }
 
       emailService.sendOTPEmail(personalEmail, name, otp).catch(() => {});
 
@@ -199,17 +257,32 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    const guardianEmail = await generateGuardianEmail(name);
+    let guardianEmail = await generateGuardianEmail(name);
     const hashedPassword = await bcrypt.hash(password, 10);
     const userRole = 'user';
     const otp = generateOTP();
     const otpExpiry = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
-    const result = await query(
-      `INSERT INTO users (name, email, personal_email, password, role, created_at, updated_at, is_verified, otp, otp_expiry)
-       VALUES ($1, $2, $3, $4, $5, now(), now(), false, $6, $7) RETURNING id`,
-      [name, guardianEmail, personalEmail, hashedPassword, userRole, otp, otpExpiry]
-    );
+    // Collision-safe: concurrent same-name registers pass the SELECT check
+    // with the same candidate, then one INSERT hits the users.email UNIQUE
+    // constraint (23505). Retry with a fresh suffix instead of 500ing.
+    let result = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        result = await query(
+          `INSERT INTO users (name, email, personal_email, password, role, created_at, updated_at, is_verified, otp, otp_expiry)
+           VALUES ($1, $2, $3, $4, $5, now(), now(), false, $6, $7) RETURNING id`,
+          [name, guardianEmail, personalEmail, hashedPassword, userRole, otp, otpExpiry]
+        );
+        break;
+      } catch (err) {
+        if (isEmailUniqueViolation(err) && attempt < 5) {
+          guardianEmail = freshGuardianEmailOnCollision(name, attempt);
+          continue;
+        }
+        throw err;
+      }
+    }
 
     const insertId = result[0].id;
 

@@ -7,7 +7,6 @@ uploads/
 server/config/config.env
 server/data/
 .DS_Store
-package-lock.json
 test-*.js
 test-screenshots/
 playwright-report/

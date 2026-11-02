@@ -26,8 +26,22 @@ const db = {
   ssl: config.DB_SSL !== 'false' && (process.env.DB_SSL !== 'false')
 };
 
+const configuredJwtSecret = config.JWT_SECRET || process.env.JWT_SECRET || '';
+const explicitDevMode = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+
+// Fail closed. The old guard only fired when NODE_ENV was exactly
+// "production", so a deployment that forgot to set NODE_ENV silently ran with
+// the default secret below. Now the default is only reachable in an explicit
+// development/test run (npm run dev sets NODE_ENV=development via nodemon.json).
+if (!configuredJwtSecret && !explicitDevMode) {
+  throw new Error(
+    'FATAL: JWT_SECRET is not set. Refusing to start with the development default secret. ' +
+    'Set JWT_SECRET, or run local development with NODE_ENV=development (npm run dev).'
+  );
+}
+
 const jwt = {
-  secret: config.JWT_SECRET || process.env.JWT_SECRET || 'women-safety-guardian-secret-key-2024'
+  secret: configuredJwtSecret || 'women-safety-guardian-secret-key-2024'
 };
 
 const email = {
@@ -44,6 +58,25 @@ const supabase = {
   url: config.SUPABASE_URL || process.env.SUPABASE_URL || '',
   serviceRoleKey: config.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   anonKey: config.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || ''
+};
+
+const b2 = {
+  keyId: config.B2_KEY_ID || process.env.B2_KEY_ID
+    || config.B2_APPLICATION_KEY_ID || process.env.B2_APPLICATION_KEY_ID || '',
+  applicationKey: config.B2_APPLICATION_KEY || process.env.B2_APPLICATION_KEY || '',
+  bucket: config.B2_BUCKET || process.env.B2_BUCKET || 'zelda-evidence',
+  region: config.B2_REGION || process.env.B2_REGION || '',
+  endpoint: config.B2_ENDPOINT || process.env.B2_ENDPOINT || '',
+  publicBaseUrl: config.B2_PUBLIC_BASE_URL || process.env.B2_PUBLIC_BASE_URL || ''
+};
+
+const r2 = {
+  accountId: config.R2_ACCOUNT_ID || process.env.R2_ACCOUNT_ID || '',
+  accessKeyId: config.R2_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID || '',
+  secretAccessKey: config.R2_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY || '',
+  bucket: config.R2_BUCKET || process.env.R2_BUCKET || 'sos-media',
+  publicBaseUrl: config.R2_PUBLIC_BASE_URL || process.env.R2_PUBLIC_BASE_URL || '',
+  endpoint: config.R2_ENDPOINT || process.env.R2_ENDPOINT || ''
 };
 
 const server = {
@@ -70,12 +103,17 @@ const validateConfig = () => {
     warnings.push('DATABASE_URL not configured - falling back to process.env');
   }
 
-  if (!supabase.url || (!supabase.serviceRoleKey && !supabase.anonKey)) {
-    warnings.push('Supabase not fully configured - media uploads will be disabled');
+  const b2Requested = !!(b2.keyId || b2.applicationKey || b2.region || b2.endpoint);
+  if (b2Requested && (!b2.keyId || !b2.applicationKey || !b2.bucket || (!b2.region && !b2.endpoint))) {
+    warnings.push('Backblaze B2 is partially configured - set B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET and B2_REGION (or B2_ENDPOINT)');
   }
 
-  if (!jwt.secret) {
-    warnings.push('JWT secret not configured, using default');
+  if (!b2Requested && (!supabase.url || (!supabase.serviceRoleKey && !supabase.anonKey))) {
+    warnings.push('No object storage fully configured - set B2, R2, or Supabase for media uploads');
+  }
+
+  if (!configuredJwtSecret) {
+    warnings.push('JWT secret not configured — using the development-only default (NODE_ENV=development/test)');
   }
 
   if (!email.user || !email.pass) {
@@ -96,6 +134,8 @@ module.exports = {
   config,
   db,
   supabase,
+  b2,
+  r2,
   jwt,
   email,
   server,

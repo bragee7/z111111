@@ -20,12 +20,15 @@ class SosService {
         'video',
         await MultipartFile.fromFile(videoPath, filename: 'emergency-video.webm'),
       ));
-      if (audioPath.isNotEmpty && audioPath != videoPath) {
-        formData.files.add(MapEntry(
-          'audio',
-          await MultipartFile.fromFile(audioPath, filename: 'emergency-audio.webm'),
-        ));
-      }
+    }
+    // Audio rides along when present — including the audio-only fallback
+    // (background recording without camera): the server accepts audio
+    // without video (both URLs nullable).
+    if (audioPath.isNotEmpty && audioPath != videoPath) {
+      formData.files.add(MapEntry(
+        'audio',
+        await MultipartFile.fromFile(audioPath, filename: 'emergency-audio.m4a'),
+      ));
     }
     formData.fields.addAll([
       MapEntry('locationLink', locationLink),

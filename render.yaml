@@ -1,6 +1,6 @@
 # Render blueprint for the ZELDA backend + web client.
-# The live service is zelda-api-kbtl (repo bragee7/z111111), auto-deploy on push to main.
-# This file is kept in sync with that deployment so it can be recreated/audited.
+# Live service: zelda-api-kbtl (repo bragee7/z111111), auto-deploy on push to main.
+# Secrets use `sync: false`: set their values once in the Render dashboard.
 services:
   - type: web
     name: zelda-api
@@ -11,23 +11,35 @@ services:
     startCommand: node server/index.js
     healthCheckPath: /api/health
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: DATABASE_URL
-        fromSecret: DATABASE_URL
-      - key: SUPABASE_URL
-        fromSecret: SUPABASE_URL
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        fromSecret: SUPABASE_SERVICE_ROLE_KEY
-      - key: SUPABASE_ANON_KEY
-        fromSecret: SUPABASE_ANON_KEY
+        sync: false
+      - key: DB_SSL
+        value: "true"
       - key: JWT_SECRET
-        fromSecret: JWT_SECRET
-      - key: SENDGRID_API_KEY
-        fromSecret: SENDGRID_API_KEY
-      - key: EMAIL_FROM
-        value: ZELDA <zyracmt@gmail.com>
-      - key: POLICE_EMAIL
-        value: police@guardian.com
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: B2_BUCKET
+        value: zeldadb
+      - key: B2_REGION
+        value: us-east-005
+      - key: B2_ENDPOINT
+        value: https://s3.us-east-005.backblazeb2.com
+      - key: B2_PUBLIC_BASE_URL
+        value: ""
+      - key: CORS_ORIGINS
+        value: https://zelda-api-kbtl.onrender.com
       - key: CLIENT_URL
         value: https://zelda-api-kbtl.onrender.com
       - key: API_URL
         value: https://zelda-api-kbtl.onrender.com
+      - key: EMAIL_FROM
+        value: ZELDA <zyracmt@gmail.com>
+      - key: POLICE_EMAIL
+        value: police@guardian.com
+      - key: SENDGRID_API_KEY
+        sync: false

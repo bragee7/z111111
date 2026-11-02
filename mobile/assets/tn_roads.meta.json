@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "format": "TNG2",
+  "source": "OpenStreetMap state extract (tamil_nadu.osm.pbf)",
+  "attribution": "\u00a9 OpenStreetMap contributors (ODbL)",
+  "generated": "2026-10-22T06:32:13Z",
+  "bbox": {
+    "lat_min": 7.95,
+    "lat_max": 13.62,
+    "lng_min": 76.1,
+    "lng_max": 80.65
+  },
+  "nodes": 2080584,
+  "edges": 2106025,
+  "names": 6144,
+  "gridX": 128,
+  "gridY": 128,
+  "rawBytes": 58994272,
+  "gzipBytes": 23981969,
+  "byClass": {
+    "motorway": 2735,
+    "motorway_link": 752,
+    "primary": 240548,
+    "primary_link": 5125,
+    "road": 21176,
+    "secondary": 336257,
+    "secondary_link": 1165,
+    "tertiary": 1344742,
+    "tertiary_link": 8159,
+    "trunk": 136089,
+    "trunk_link": 9277
+  }
+}

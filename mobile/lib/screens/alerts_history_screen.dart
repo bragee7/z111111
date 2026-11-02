@@ -19,6 +19,7 @@ class _AlertsHistoryScreenState extends State<AlertsHistoryScreen> {
 
   List<SosCase> _cases = [];
   bool _loading = true;
+  String _error = '';
 
   @override
   void initState() {
@@ -27,7 +28,10 @@ class _AlertsHistoryScreenState extends State<AlertsHistoryScreen> {
   }
 
   Future<void> _fetchCases() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
     try {
       final cases = await _sosService.getCases();
       if (!mounted) return;
@@ -40,6 +44,7 @@ class _AlertsHistoryScreenState extends State<AlertsHistoryScreen> {
       setState(() {
         _cases = [];
         _loading = false;
+        _error = 'Could not load alerts. Check your connection and retry.';
       });
     }
   }
@@ -64,12 +69,33 @@ class _AlertsHistoryScreenState extends State<AlertsHistoryScreen> {
       body: _loading
           ? const Center(child: LoadingSpinner(color: AppColors.blue400, size: 44))
           : _cases.isEmpty
-              ? const Center(
-                  child: Text(
-                    'No SOS alerts yet.\nTap SEND SOS ALERT to raise one.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: AppColors.gray500, fontSize: 14),
-                  ),
+              ? Center(
+                  child: _error.isNotEmpty
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _error,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: AppColors.gray400, fontSize: 14),
+                            ),
+                            const SizedBox(height: 12),
+                            ElevatedButton.icon(
+                              onPressed: _fetchCases,
+                              style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.blue600),
+                              icon: const Icon(Icons.refresh, size: 18),
+                              label: const Text('Retry'),
+                            ),
+                          ],
+                        )
+                      : const Text(
+                          'No SOS alerts yet.\nTap SEND SOS ALERT to raise one.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              color: AppColors.gray500, fontSize: 14),
+                        ),
                 )
               : RefreshIndicator(
                   onRefresh: _fetchCases,
