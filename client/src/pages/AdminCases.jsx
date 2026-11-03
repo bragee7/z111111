@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { adminAPI } from '../services/api';
 
@@ -7,22 +7,28 @@ const AdminCases = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
+  const [lastUpdated, setLastUpdated] = useState(null);
 
-  const loadCases = async () => {
+  const loadCases = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const params = filter ? { status: filter } : {};
       const response = await adminAPI.getCases(params);
       setCases(response.data.cases);
-      setLoading(false);
+      setLastUpdated(new Date());
+      setError('');
     } catch (err) {
       setError('Failed to load cases');
-      setLoading(false);
+    } finally {
+      if (!silent) setLoading(false);
     }
-  };
+  }, [filter]);
 
   useEffect(() => {
     loadCases();
-  }, [filter]);
+    const interval = setInterval(() => loadCases(true), 60000);
+    return () => clearInterval(interval);
+  }, [loadCases]);
 
   const formatDate = (ts) => {
     if (!ts) return '—';
@@ -43,7 +49,13 @@ const AdminCases = () => {
     <div className="min-h-screen bg-gray-900 p-6">
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-3xl font-bold text-white">All SOS Cases</h1>
+          <div>
+            <h1 className="text-3xl font-bold text-white">All SOS Cases</h1>
+            <p className="text-sm text-gray-400 mt-1">
+              Auto-refresh every 60s
+              {lastUpdated ? ` · last checked ${lastUpdated.toLocaleTimeString()}` : ''}
+            </p>
+          </div>
           <div className="flex gap-2">
             {[
               { label: 'All', value: '' },

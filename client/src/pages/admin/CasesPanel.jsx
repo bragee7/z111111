@@ -35,8 +35,8 @@ const CasesPanel = ({ onClose, title, fixedStatus, columns: overrideColumns }) =
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError('');
     try {
       const params = {
@@ -52,11 +52,15 @@ const CasesPanel = ({ onClose, title, fixedStatus, columns: overrideColumns }) =
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to load cases');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [page, size, search, status, priority, dateRange, today]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    const interval = setInterval(() => load(true), 60000);
+    return () => clearInterval(interval);
+  }, [load]);
 
   const columns = overrideColumns || [
     { key: 'id', label: 'Case ID', render: (r) => <span className="text-gray-400 font-mono text-xs">{shortId(r.id)}</span> },
@@ -71,7 +75,7 @@ const CasesPanel = ({ onClose, title, fixedStatus, columns: overrideColumns }) =
     { key: 'assignedOfficer', label: 'Assigned Officer', render: (r) => <span className="text-gray-300">{r.assignedOfficer || '—'}</span> },
     { key: 'updatedAt', label: 'Last Updated', render: (r) => formatDateTime(r.updatedAt) },
   ];
-  columns.push({ key: 'actions', label: 'Actions', render: (r) => <CaseActions row={r} onChanged={load} /> });
+  columns.push({ key: 'actions', label: 'Actions', render: (r) => <CaseActions row={r} onChanged={() => load()} /> });
 
   const filters = [];
   if (!fixedStatus) filters.push({ key: 'status', label: 'All Statuses', options: [{ value: 'Pending', label: 'Pending' }, { value: 'Resolved', label: 'Resolved' }] });
@@ -93,10 +97,10 @@ const CasesPanel = ({ onClose, title, fixedStatus, columns: overrideColumns }) =
             Today only
           </label>
         )}
-        <RefreshButton onClick={load} loading={loading} />
+        <RefreshButton onClick={() => load()} loading={loading} />
       </div>
 
-      {error ? <ErrorState message={error} onRetry={load} /> : loading ? <LoadingState label="Loading cases..." /> : data.cases.length === 0 ? <EmptyState title="No cases found" message="There are no cases matching the current filters." /> : (
+      {error ? <ErrorState message={error} onRetry={() => load()} /> : loading ? <LoadingState label="Loading cases..." /> : data.cases.length === 0 ? <EmptyState title="No cases found" message="There are no cases matching the current filters." /> : (
         <>
           <DataTable columns={columns} rows={data.cases} rowKey="id" />
           <Pagination total={data.total} page={page} size={size} onPageChange={setPage} />

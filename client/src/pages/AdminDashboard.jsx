@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { adminAPI } from '../services/api';
+import { useEmergencyAlert } from '../hooks/useEmergencyAlert';
 import DashboardChart from '../components/admin/DashboardChart';
 import RefreshButton from '../components/admin/RefreshButton';
 import DetailDrawer from '../components/admin/DetailDrawer';
@@ -108,10 +109,19 @@ function AdminDashboard() {
   const [geoPoints, setGeoPoints] = useState([]);
   const [seriesPeriod, setSeriesPeriod] = useState('week');
   const [seriesData, setSeriesData] = useState([]);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const pendingIdsRef = useRef(null);
+  const {
+    alertActive: newAlert,
+    audioReady,
+    triggerAlert,
+    dismissAlert,
+    ensureAudio,
+  } = useEmergencyAlert(10000);
 
   const loadData = useCallback(async () => {
     try {
-      const [ov, reg, cbd, cbu, sd, geo, sdata] = await Promise.all([
+      const [ov, reg, cbd, cbu, sd, geo, sdata, pendingRes] = await Promise.all([
         adminAPI.getOverview(),
         adminAPI.getRegistrations(30),
         adminAPI.getCasesByDay(30),
@@ -119,7 +129,16 @@ function AdminDashboard() {
         adminAPI.getStatusDistribution(),
         adminAPI.getGeo(),
         adminAPI.getSeries(seriesPeriod),
+        adminAPI.getCases({ status: 'Pending', page: 1, size: 100 }),
       ]);
+      const pendingCases = pendingRes.data.cases || [];
+      const nextPendingIds = new Set(pendingCases.map((item) => item.id));
+      const knownPendingIds = pendingIdsRef.current;
+      const hasNewPending = knownPendingIds
+        && pendingCases.some((item) => !knownPendingIds.has(item.id));
+      pendingIdsRef.current = nextPendingIds;
+      if (hasNewPending) triggerAlert();
+
       setOverview(ov.data);
       setRegistrations(reg.data.series || []);
       setCasesByDay(cbd.data.series || []);
@@ -127,6 +146,7 @@ function AdminDashboard() {
       setStatusDist(sd.data.distribution || []);
       setGeoPoints(geo.data.points || []);
       setSeriesData(sdata.data.series || []);
+      setLastUpdated(new Date());
       setError('');
     } catch (e) {
       setError('Failed to load dashboard data. Please try again.');
@@ -134,10 +154,12 @@ function AdminDashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [seriesPeriod]);
+  }, [seriesPeriod, triggerAlert]);
 
   useEffect(() => {
     loadData();
+    const interval = setInterval(loadData, 60000);
+    return () => clearInterval(interval);
   }, [loadData]);
 
   const handleRefresh = () => {
@@ -192,10 +214,37 @@ function AdminDashboard() {
   return (
     <div className="min-h-screen bg-gray-900 p-6">
       <div className="max-w-7xl mx-auto">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-2">
           <h1 className="text-3xl font-bold text-white">Admin Dashboard</h1>
-          <RefreshButton onClick={handleRefresh} loading={refreshing} label="⟳ Refresh" />
+          <div className="flex items-center gap-3">
+            {!audioReady && (
+              <button
+                type="button"
+                onClick={ensureAudio}
+                className="bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+              >
+                🔔 Enable alarm sound
+              </button>
+            )}
+            <RefreshButton onClick={handleRefresh} loading={refreshing} label="⟳ Refresh" />
+          </div>
         </div>
+
+        <p className="text-sm text-gray-400 mb-6">
+          Auto-refresh every 60s
+          {lastUpdated ? ` · last checked ${lastUpdated.toLocaleTimeString()}` : ''}
+        </p>
+
+        {newAlert && (
+          <button
+            type="button"
+            onClick={dismissAlert}
+            className="w-full bg-red-600 hover:bg-red-500 text-white px-6 py-4 rounded-lg mb-6 text-left transition-colors animate-pulse"
+          >
+            <span className="text-lg font-bold">🚨 NEW EMERGENCY ALERT RECEIVED! 🚨</span>
+            <span className="block text-sm text-red-100 mt-1">A new SOS case is pending. Tap to dismiss.</span>
+          </button>
+        )}
 
         {error && (
           <div className="bg-red-900 border border-red-700 text-red-200 px-6 py-4 rounded-lg mb-6">

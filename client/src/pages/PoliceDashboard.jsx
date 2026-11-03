@@ -1,78 +1,52 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { sosAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import MapView, { policeStationIcon } from '../components/MapView';
+import { useEmergencyAlert } from '../hooks/useEmergencyAlert';
 
 const PoliceDashboard = () => {
   const { user } = useAuth();
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [newAlert, setNewAlert] = useState(false);
-  const [lastCount, setLastCount] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const knownIdsRef = useRef(null);
+  const {
+    alertActive: newAlert,
+    audioReady,
+    triggerAlert,
+    dismissAlert,
+    ensureAudio,
+  } = useEmergencyAlert(10000);
+
+  const fetchCases = useCallback(async () => {
+    try {
+      const response = await sosAPI.getCases();
+      const nextCases = response.data.cases || [];
+      const nextIds = new Set(nextCases.map((item) => item.id));
+      const knownIds = knownIdsRef.current;
+      const hasNewPending = knownIds
+        && nextCases.some((item) => item.status === 'Pending' && !knownIds.has(item.id));
+
+      knownIdsRef.current = nextIds;
+      if (hasNewPending) triggerAlert();
+
+      setCases(nextCases);
+      setLastUpdated(new Date());
+      setLoading(false);
+      setError('');
+    } catch (err) {
+      setError('Failed to fetch cases. Retrying automatically...');
+      setLoading(false);
+    }
+  }, [triggerAlert]);
 
   useEffect(() => {
     fetchCases();
     const interval = setInterval(fetchCases, 10000);
     return () => clearInterval(interval);
-  }, []);
-
-  const fetchCases = async () => {
-    try {
-      const response = await sosAPI.getCases();
-      const newCases = response.data.cases || [];
-      
-      if (newCases.length > lastCount && lastCount > 0) {
-        setNewAlert(true);
-        playAlertSound();
-        setTimeout(() => setNewAlert(false), 5000);
-      }
-      
-      setLastCount(newCases.length);
-      setCases(newCases);
-      setLoading(false);
-    } catch (err) {
-      setError('Failed to fetch cases');
-      setLoading(false);
-    }
-  };
-
-  const playAlertSound = () => {
-    try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      oscillator.frequency.value = 800;
-      oscillator.type = 'square';
-      gainNode.gain.value = 0.3;
-      
-      oscillator.start();
-      
-      setTimeout(() => {
-        oscillator.frequency.value = 600;
-      }, 200);
-      
-      setTimeout(() => {
-        oscillator.frequency.value = 800;
-      }, 400);
-      
-      setTimeout(() => {
-        oscillator.frequency.value = 1000;
-      }, 600);
-      
-      setTimeout(() => {
-        oscillator.stop();
-        audioContext.close();
-      }, 800);
-    } catch (err) {
-      console.error('Error playing alert sound:', err);
-    }
-  };
+  }, [fetchCases]);
 
   const formatDate = (timestamp) => {
     const date = new Date(timestamp);
@@ -123,6 +97,19 @@ const PoliceDashboard = () => {
             <div>
               <h1 className="text-4xl font-bold text-white mb-2">Police Control Center</h1>
               <p className="text-gray-300">Welcome, Officer {user?.name}</p>
+              <p className="text-gray-400 text-xs mt-2">
+                Live updates every 10s
+                {lastUpdated ? ` · last checked ${lastUpdated.toLocaleTimeString()}` : ''}
+              </p>
+              {!audioReady && (
+                <button
+                  type="button"
+                  onClick={ensureAudio}
+                  className="mt-3 bg-white/15 hover:bg-white/25 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                >
+                  🔔 Enable alarm sound
+                </button>
+              )}
             </div>
             <div className="text-right">
               <div className="text-5xl font-bold text-white">{pendingCases.length}</div>
@@ -132,9 +119,14 @@ const PoliceDashboard = () => {
         </div>
 
         {newAlert && (
-          <div className="bg-red-600 text-white px-6 py-4 rounded-xl mb-6 animate-bounce text-center text-xl font-bold">
+          <button
+            type="button"
+            onClick={dismissAlert}
+            className="w-full bg-red-600 text-white px-6 py-4 rounded-xl mb-6 animate-bounce text-center text-xl font-bold"
+          >
             🚨 NEW EMERGENCY ALERT RECEIVED! 🚨
-          </div>
+            <span className="block text-sm font-normal mt-1">Tap to dismiss</span>
+          </button>
         )}
 
         {error && (
