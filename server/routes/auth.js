@@ -247,13 +247,19 @@ router.post('/register', async (req, res) => {
         }
       }
 
-      emailService.sendOTPEmail(personalEmail, name, otp).catch(() => {});
+      const emailResult = await emailService.sendOTPEmail(personalEmail, name, otp);
+      if (!emailResult.success) {
+        console.error('OTP email failed (re-register):', emailResult.error);
+      }
 
       return res.status(201).json({
-        message: 'Verification OTP sent to your personal email',
+        message: emailResult.success
+          ? 'Verification OTP sent to your personal email'
+          : 'Account updated, but the OTP email could not be sent. Please use Resend OTP.',
         guardianEmail: newGuardianEmail,
         personalEmail,
-        requiresVerification: true
+        requiresVerification: true,
+        emailSent: emailResult.success
       });
     }
 
@@ -288,13 +294,19 @@ router.post('/register', async (req, res) => {
 
     await auditLog(insertId, null, 'USER_REGISTERED', `New user registered: ${guardianEmail} (via ${personalEmail}) - pending verification`);
 
-    emailService.sendOTPEmail(personalEmail, name, otp).catch(() => {});
+    const emailResult = await emailService.sendOTPEmail(personalEmail, name, otp);
+    if (!emailResult.success) {
+      console.error('OTP email failed (register):', emailResult.error);
+    }
 
     res.status(201).json({
-      message: 'Registration successful! Please check your personal email for the verification OTP.',
+      message: emailResult.success
+        ? 'Registration successful! Please check your personal email for the verification OTP.'
+        : 'Registration successful, but the OTP email could not be sent. Please use Resend OTP.',
       requiresVerification: true,
       guardianEmail,
-      personalEmail
+      personalEmail,
+      emailSent: emailResult.success
     });
   } catch (error) {
     console.error('Register error:', error.code || '', error.message);
@@ -383,10 +395,18 @@ router.post('/resend-otp', async (req, res) => {
       [otp, otpExpiry, user.id]
     );
 
-    emailService.sendOTPEmail(personalEmail, user.name, otp).catch(() => {});
+    const emailResult = await emailService.sendOTPEmail(personalEmail, user.name, otp);
+    if (!emailResult.success) {
+      console.error('OTP email failed (resend):', emailResult.error);
+      return res.status(502).json({
+        error: 'Could not send the OTP email right now. Please try again shortly.',
+        emailSent: false
+      });
+    }
 
     res.json({
-      message: 'New OTP sent to your personal email'
+      message: 'New OTP sent to your personal email',
+      emailSent: true
     });
   } catch (error) {
     console.error('Resend OTP error:', error);
@@ -418,12 +438,18 @@ router.post('/login', async (req, res) => {
         [otp, otpExpiry, user.id]
       );
 
-      emailService.sendOTPEmail(user.personal_email, user.name, otp).catch(() => {});
+      const emailResult = await emailService.sendOTPEmail(user.personal_email, user.name, otp);
+      if (!emailResult.success) {
+        console.error('OTP email failed (login-unverified):', emailResult.error);
+      }
 
       return res.status(403).json({
-        error: 'Please verify your email first. A new OTP has been sent to your personal email.',
+        error: emailResult.success
+          ? 'Please verify your email first. A new OTP has been sent to your personal email.'
+          : 'Please verify your email first. The OTP email could not be sent; please use Resend OTP.',
         requiresVerification: true,
-        personalEmail: user.personal_email
+        personalEmail: user.personal_email,
+        emailSent: emailResult.success
       });
     }
 

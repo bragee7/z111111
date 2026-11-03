@@ -1,6 +1,9 @@
+const nodemailer = require('nodemailer');
 const config = require('../config');
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3/mail/send';
+
+let smtpTransport = null;
 
 const parseFrom = () => {
   const raw = config.email.from || `ZELDA <${config.email.user}>`;
@@ -9,8 +12,55 @@ const parseFrom = () => {
   return { name: 'ZELDA', email: raw.trim() };
 };
 
+const isSmtpConfigured = () => {
+  return !!(config.email.host && config.email.user && config.email.pass);
+};
+
 const isEmailConfigured = () => {
-  return !!(config.email.sendgridApiKey && config.email.user);
+  return !!(config.email.sendgridApiKey || isSmtpConfigured());
+};
+
+const getSmtpTransport = () => {
+  if (!smtpTransport) {
+    const port = Number(config.email.port) || 587;
+    smtpTransport = nodemailer.createTransport({
+      host: config.email.host,
+      port,
+      secure: port === 465,
+      auth: {
+        user: config.email.user,
+        pass: config.email.pass
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000
+    });
+  }
+  return smtpTransport;
+};
+
+const sendViaSMTP = async (to, subject, html) => {
+  if (!isSmtpConfigured()) {
+    return { success: false, error: 'SMTP not configured' };
+  }
+
+  const recipients = Array.isArray(to)
+    ? to.map(t => (typeof t === 'string' ? t : t.email)).join(', ')
+    : to;
+
+  try {
+    const info = await getSmtpTransport().sendMail({
+      from: config.email.from || config.email.user,
+      to: recipients,
+      subject,
+      html
+    });
+    console.log(`📧 Email sent to ${recipients} via SMTP (${info.messageId || 'accepted'})`);
+    return { success: true };
+  } catch (error) {
+    console.error('SMTP send error:', error.message);
+    return { success: false, error: error.message };
+  }
 };
 
 const sendViaSendGrid = async (to, subject, html) => {
@@ -54,8 +104,30 @@ const sendViaSendGrid = async (to, subject, html) => {
   }
 };
 
+const sendEmail = async (to, subject, html) => {
+  if (config.email.sendgridApiKey) {
+    const sg = await sendViaSendGrid(to, subject, html);
+    if (sg.success) return sg;
+
+    console.warn(`SendGrid failed (${sg.error}); trying SMTP fallback`);
+    if (isSmtpConfigured()) {
+      const smtp = await sendViaSMTP(to, subject, html);
+      if (smtp.success) return smtp;
+      return { success: false, error: `${sg.error}; SMTP: ${smtp.error}` };
+    }
+    return sg;
+  }
+
+  if (isSmtpConfigured()) {
+    return sendViaSMTP(to, subject, html);
+  }
+
+  console.warn('⚠️ Email not configured - cannot send');
+  return { success: false, error: 'Email not configured' };
+};
+
 const sendOTPEmail = async (email, name, otp) => {
-  return sendViaSendGrid(
+  return sendEmail(
     email,
     'ZELDA - Email Verification',
     `
@@ -90,7 +162,7 @@ const sendSOSAlert = async (caseData, videoUrl, audioUrl) => {
     mediaLinks.push(`<p><strong>Audio:</strong> <a href="${audioUrl}">Play emergency audio</a></p>`);
   }
 
-  return sendViaSendGrid(
+  return sendEmail(
     config.email.policeEmail,
     `🚨 SOS ALERT - Emergency from ${caseData.user_email}`,
     `
@@ -109,7 +181,7 @@ const sendSOSAlert = async (caseData, videoUrl, audioUrl) => {
 };
 
 const sendContactSOSAlert = async (caseData, contact) => {
-  return sendViaSendGrid(
+  return sendEmail(
     contact.email,
     `🚨 SOS EMERGENCY - ${caseData.user_email} needs help!`,
     `
@@ -128,7 +200,7 @@ const sendContactSOSAlert = async (caseData, contact) => {
 };
 
 const sendTestEmail = async () => {
-  return sendViaSendGrid(
+  return sendEmail(
     config.email.policeEmail,
     'Test Email - Women Safety Guardian',
     '<p>This is a test email from Women Safety Guardian.</p>'
