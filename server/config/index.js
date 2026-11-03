@@ -50,6 +50,10 @@ const email = {
   user: config.EMAIL_USER || process.env.EMAIL_USER || '',
   pass: config.EMAIL_PASS || process.env.EMAIL_PASS || '',
   sendgridApiKey: config.SENDGRID_API_KEY || process.env.SENDGRID_API_KEY || '',
+  brevoApiKey: config.BREVO_API_KEY || process.env.BREVO_API_KEY || '',
+  brevoSenderEmail: config.BREVO_SENDER_EMAIL || process.env.BREVO_SENDER_EMAIL || '',
+  brevoSenderName: config.BREVO_SENDER_NAME || process.env.BREVO_SENDER_NAME || 'ZELDA',
+  smtpEnabled: (config.EMAIL_SMTP_ENABLED || process.env.EMAIL_SMTP_ENABLED || 'false') === 'true',
   from: config.EMAIL_FROM || process.env.EMAIL_FROM || 'Women Safety Guardian <noreply@guaridan.com>',
   policeEmail: config.POLICE_EMAIL || process.env.POLICE_EMAIL || 'police@guardian.com'
 };

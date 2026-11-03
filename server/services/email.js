@@ -13,11 +13,15 @@ const parseFrom = () => {
 };
 
 const isSmtpConfigured = () => {
-  return !!(config.email.host && config.email.user && config.email.pass);
+  return !!(config.email.smtpEnabled && config.email.host && config.email.user && config.email.pass);
+};
+
+const isBrevoConfigured = () => {
+  return !!(config.email.brevoApiKey && (config.email.brevoSenderEmail || config.email.user));
 };
 
 const isEmailConfigured = () => {
-  return !!(config.email.sendgridApiKey || isSmtpConfigured());
+  return !!(config.email.sendgridApiKey || isBrevoConfigured() || isSmtpConfigured());
 };
 
 const getSmtpTransport = () => {
@@ -104,26 +108,75 @@ const sendViaSendGrid = async (to, subject, html) => {
   }
 };
 
+const sendViaBrevo = async (to, subject, html) => {
+  if (!isBrevoConfigured()) {
+    return { success: false, error: 'Brevo not configured' };
+  }
+
+  const recipients = Array.isArray(to)
+    ? to.map(t => (typeof t === 'string' ? { email: t } : t))
+    : [{ email: to }];
+
+  const senderEmail = config.email.brevoSenderEmail || config.email.user;
+
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': config.email.brevoApiKey
+      },
+      body: JSON.stringify({
+        sender: { name: config.email.brevoSenderName || 'ZELDA', email: senderEmail },
+        to: recipients,
+        subject,
+        htmlContent: html
+      })
+    });
+
+    if (response.status === 201 || response.status === 200) {
+      console.log(`📧 Email sent to ${recipients.map(r => r.email).join(', ')} via Brevo`);
+      return { success: true };
+    }
+
+    const body = await response.text();
+    console.error(`Email send error: Brevo ${response.status}: ${body}`);
+    return { success: false, error: `Brevo ${response.status}: ${body}` };
+  } catch (error) {
+    console.error('Brevo send error:', error.message);
+    return { success: false, error: error.message };
+  }
+};
+
 const sendEmail = async (to, subject, html) => {
+  const failures = [];
+
   if (config.email.sendgridApiKey) {
     const sg = await sendViaSendGrid(to, subject, html);
     if (sg.success) return sg;
+    failures.push(sg.error);
+    console.warn(`SendGrid failed (${sg.error}); trying next provider`);
+  }
 
-    console.warn(`SendGrid failed (${sg.error}); trying SMTP fallback`);
-    if (isSmtpConfigured()) {
-      const smtp = await sendViaSMTP(to, subject, html);
-      if (smtp.success) return smtp;
-      return { success: false, error: `${sg.error}; SMTP: ${smtp.error}` };
-    }
-    return sg;
+  if (isBrevoConfigured()) {
+    const brevo = await sendViaBrevo(to, subject, html);
+    if (brevo.success) return brevo;
+    failures.push(brevo.error);
+    console.warn(`Brevo failed (${brevo.error}); trying next provider`);
   }
 
   if (isSmtpConfigured()) {
-    return sendViaSMTP(to, subject, html);
+    const smtp = await sendViaSMTP(to, subject, html);
+    if (smtp.success) return smtp;
+    failures.push(smtp.error);
   }
 
-  console.warn('⚠️ Email not configured - cannot send');
-  return { success: false, error: 'Email not configured' };
+  if (!failures.length) {
+    console.warn('⚠️ Email not configured - cannot send');
+    return { success: false, error: 'Email not configured' };
+  }
+
+  return { success: false, error: failures.join('; ') };
 };
 
 const sendOTPEmail = async (email, name, otp) => {
