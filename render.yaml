@@ -43,3 +43,11 @@ services:
         value: police@guardian.com
       - key: SENDGRID_API_KEY
         sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        value: zyracmt@gmail.com
+      - key: BREVO_SENDER_NAME
+        value: ZELDA
+      - key: EMAIL_SMTP_ENABLED
+        value: "false"
