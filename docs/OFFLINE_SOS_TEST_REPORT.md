@@ -1,6 +1,6 @@
 # ZELDA Offline-First SOS — Test Report
 
-Status: **Implementation complete. Automated checks pass. Online, offline-queue, reboot-recovery, automatic-sync, session-fencing, and MP4 evidence paths verified on a real device against staging.** No push, commit, deploy, or real emergency alert has been performed.
+Status: **Implementation complete and deployed to production on 2026-11-04.** Automated checks pass. Online, offline-queue, reboot-recovery, automatic-sync, session-fencing, and MP4 evidence paths verified on a real device against staging. Live API `https://zelda-api-kbtl.onrender.com`, deploy commit `54f750a`; the schema migration is applied automatically at startup and confirmed by `GET /api/health/db`. No real emergency alert has been performed.
 
 Test date: 2026-11-04
 Device: Redmi Note 13 5G (`t8wwmvdyvw4x8p99`), app `com.zelda.zeldav2`
@@ -98,13 +98,17 @@ The five extra queued rows seen in the first offline run were caused by repeated
 - Location tracking badge and live updates on the police dashboard after metadata-only delivery.
 - Long-duration retry behaviour (backoff over hours, queue lease expiry).
 
-## 5. Cleanup / production gate
+## 5. Deployment record
 
-- Staging-only credentials and URLs were used; production `https://zelda-api-kbtl.onrender.com` was never touched.
-- No push, commit, or deploy has been performed.
+- Deployed 2026-11-04 to Render service `zelda-api-kbtl` from `bragee7/z111111` main, commit `54f750a` (parent `f464cbf`).
+- Production database migrated automatically at container start; `GET /api/health/db` reports `2026-11-03_offline_sos_sync.sql` in `schema_migrations`.
+- Verified live: `/api/ping` returns `204`, `/api/health` reports database connected, and the served bundle `index-BUnYVAnx.js` contains the `OFFLINE SYNC` / `Evidence` badges.
+- Production has its own database and B2 bucket `zeldadb`; the staging cases (1–17) are not present there and must not be imported.
 - The temporary `[DEBUG LOGIN]` credential log was removed from `server/routes/auth.js`, and the untracked staging helper scripts were deleted.
-- Before production: rotate the B2/Render/Brevo credentials exposed during staging setup.
+- Before real use: rotate the B2/Render/Brevo credentials exposed during staging setup.
 
-## 6. Permission request
+## 6. Remaining rollout steps
 
-Online, offline, reboot-recovery, automatic-sync, and MP4 evidence paths are verified on staging. I will not push, commit, or deploy until you explicitly approve.
+- Rebuild the mobile APK with `--dart-define=API_BASE_URL=https://zelda-api-kbtl.onrender.com` and install it; the current test APK still targets `127.0.0.1`.
+- Add `zelda1/mobile/android/key.properties` so release builds are not debug-signed.
+- Production notifications are live: `ALLOW_TEST_SOS` is ignored when `NODE_ENV=production`, so a test SOS on production emails real contacts.
