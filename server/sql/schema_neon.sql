@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS sos_cases (
   audio_url TEXT,
   video_sha256 TEXT,
   audio_sha256 TEXT,
+  -- Offline-first synchronization metadata.
+  client_reference TEXT,
+  captured_at TIMESTAMPTZ,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  synced_at TIMESTAMPTZ,
+  sync_source TEXT NOT NULL DEFAULT 'online',
+  evidence_status TEXT NOT NULL DEFAULT 'none',
+  device_id TEXT,
+  app_version TEXT,
+  is_test BOOLEAN NOT NULL DEFAULT false,
+  clock_skew_seconds INTEGER,
   trigger_type TEXT NOT NULL DEFAULT 'manual',
   priority TEXT NOT NULL DEFAULT 'Medium',
   case_type TEXT,
@@ -76,6 +87,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_sos_cases_user_id ON sos_cases(user_id);
 CREATE INDEX IF NOT EXISTS idx_sos_cases_status ON sos_cases(status);
+CREATE INDEX IF NOT EXISTS idx_sos_cases_received_at ON sos_cases(received_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sos_cases_client_ref
+  ON sos_cases(user_id, client_reference)
+  WHERE client_reference IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_contacts_user_id ON contacts(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_case_id ON audit_log(case_id);

@@ -73,7 +73,7 @@ The server refuses to start in production without a real `JWT_SECRET`.
 
 ## 4. Database schema
 
-Apply once per Neon database:
+Create the base schema once per Neon database:
 
 ```bash
 psql "$DATABASE_URL" -f server/sql/schema_neon.sql
@@ -82,6 +82,13 @@ psql "$DATABASE_URL" -f server/sql/schema_neon.sql
 The script is idempotent. It creates `users`, `sos_cases`, `contacts`,
 `user_preferences`, `audit_log`, indexes, and demo accounts
 (`police@guardian.com` / `user@guardian.com`).
+
+Incremental changes live in `server/sql/migrations/` and are applied
+**automatically on server start**. Each file runs once and is recorded in
+`schema_migrations`; the whole run is wrapped in a transaction guarded by a
+Postgres advisory lock, and a failure stops the process instead of serving a
+mismatched schema. Set `SKIP_DB_MIGRATIONS=true` only for read-only replicas.
+The applied versions are visible at `GET /api/health/db`.
 
 ## 5. Deploying the frontend
 

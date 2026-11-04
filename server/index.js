@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const { isAllowedOrigin } = require('./config/origins');
 const { pool } = require('./db');
+const { runMigrations } = require('./db/migrations');
 const storage = require('./storage');
 const { initSocket } = require('./socket');
 const authRoutes = require('./routes/auth');
@@ -48,7 +49,7 @@ const strictLimiter = (windowMs, max) =>
 app.use(cors({
   origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Zelda-Test'],
   maxAge: 86400
 }));
 app.use(express.json());
@@ -59,9 +60,15 @@ app.use('/api/auth/login', strictLimiter(rlWindowMs, 10));
 app.use('/api/auth/register', strictLimiter(60 * 60 * 1000, 5));
 app.use('/api/auth/verify-otp', strictLimiter(rlWindowMs, 10));
 app.use('/api/auth/resend-otp', strictLimiter(rlWindowMs, 10));
-// Strict rate-limit for SOS creation. Explicit next() fall-through to the
-// sosRoutes router mounted below (app.use('/api/sos', sosRoutes) handles POST /).
-app.post('/api/sos', strictLimiter(rlWindowMs, 10), (req, res, next) => next());
+// SOS creation is retried by the offline sync engine. Keep a strict ceiling,
+// but leave enough headroom for evidence retries and duplicate replays.
+// Explicit next() fall-through to the sosRoutes router mounted below
+// (app.use('/api/sos', sosRoutes) handles POST /).
+app.post('/api/sos', strictLimiter(rlWindowMs, 60), (req, res, next) => next());
+
+// Cheap connectivity probe for the mobile offline-sync engine. Deliberately
+// does not touch the database so a cold Neon instance cannot look "offline".
+app.get('/api/ping', (req, res) => res.status(204).end());
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -125,8 +132,16 @@ app.get('/api/health/db', async (req, res) => {
     const c = await pool.connect();
     const r = await c.query('SELECT 1 as ok');
     const t = await c.query("SELECT tablename FROM pg_tables WHERE schemaname='public' LIMIT 5");
+    const m = await c
+      .query('SELECT version FROM schema_migrations ORDER BY version')
+      .catch(() => ({ rows: [] }));
     c.release();
-    res.json({ ok: true, probe: r.rows[0], tables: t.rows.map(x=>x.tablename) });
+    res.json({
+      ok: true,
+      probe: r.rows[0],
+      tables: t.rows.map(x => x.tablename),
+      migrations: m.rows.map(x => x.version)
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message, code: e.code || null });
   }
@@ -153,9 +168,24 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
-httpServer.listen(PORT, () => {
-  console.log(`🚀 Women Safety Guardian running on http://localhost:${PORT}`);
-  console.log(`🐘 Database: Postgres (Neon/Supabase)`);
-  console.log(`📧 Email: ${config.email.user || 'Not configured'}`);
-  console.log(`👮 Police Email: ${config.email.policeEmail}`);
-});
+const start = async () => {
+  try {
+    const { applied } = await runMigrations();
+    if (applied.length > 0) {
+      console.log(`🗃️  Applied migrations: ${applied.join(', ')}`);
+    }
+  } catch (error) {
+    // Never serve traffic against a schema the code does not understand.
+    console.error(`❌ ${error.message}`);
+    process.exit(1);
+  }
+
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Women Safety Guardian running on http://localhost:${PORT}`);
+    console.log(`🐘 Database: Postgres (Neon/Supabase)`);
+    console.log(`📧 Email: ${config.email.user || 'Not configured'}`);
+    console.log(`👮 Police Email: ${config.email.policeEmail}`);
+  });
+};
+
+start();

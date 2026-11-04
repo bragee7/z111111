@@ -59,6 +59,21 @@ const PoliceDashboard = () => {
     });
   };
 
+  const delayMinutes = (caseItem) => {
+    const captured = new Date(caseItem.capturedAt || caseItem.timestamp).getTime();
+    const received = new Date(caseItem.receivedAt || caseItem.createdAt || caseItem.timestamp).getTime();
+    if (!Number.isFinite(captured) || !Number.isFinite(received)) return 0;
+    return Math.max(0, Math.round((received - captured) / 60000));
+  };
+
+  const evidenceLabel = (status) => {
+    if (status === 'pending') return 'EVIDENCE UPLOADING';
+    if (status === 'partial') return 'EVIDENCE PARTIAL';
+    if (status === 'failed') return 'EVIDENCE FAILED';
+    if (status === 'missing') return 'EVIDENCE MISSING';
+    return null;
+  };
+
   const pendingCases = cases.filter(c => c.status === 'Pending');
   const resolvedCases = cases.filter(c => c.status === 'Resolved');
 
@@ -68,7 +83,7 @@ const PoliceDashboard = () => {
       .map(c => ({
         lat: Number(c.latitude),
         lng: Number(c.longitude),
-        popupHtml: `<b>${c.status} Case</b><br/>From: ${c.userEmail || 'Unknown User'}<br/>${formatDate(c.timestamp)}${c.locationLink ? `<br/><a href="${c.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>` : ''}`,
+        popupHtml: `<b>${c.status} Case</b><br/>From: ${c.userEmail || 'Unknown User'}<br/>${formatDate(c.capturedAt || c.timestamp)}${c.syncSource === 'offline_sync' ? ' · offline sync' : ''}${c.locationLink ? `<br/><a href="${c.locationLink}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">View Location</a>` : ''}`,
       }));
     const stations = cases
       .filter(c => c.nearestPoliceStationLat && c.nearestPoliceStationLng)
@@ -223,8 +238,37 @@ const PoliceDashboard = () => {
                           From: {caseItem.userEmail || 'Unknown User'}
                         </p>
                         <p className="text-gray-500 text-xs mt-1">
-                          {formatDate(caseItem.timestamp)}
+                          Reported: {formatDate(caseItem.capturedAt || caseItem.timestamp)}
                         </p>
+                        <p className="text-gray-500 text-xs">
+                          Received: {formatDate(caseItem.receivedAt || caseItem.createdAt || caseItem.timestamp)}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 mt-2">
+                          {caseItem.syncSource === 'offline_sync' && (
+                            <span className="text-[11px] font-semibold bg-amber-900 text-amber-200 px-2 py-1 rounded-full">
+                              OFFLINE SYNC
+                            </span>
+                          )}
+                          {delayMinutes(caseItem) >= 1 && (
+                            <span className="text-[11px] bg-gray-700 text-gray-300 px-2 py-1 rounded-full">
+                              Delayed {delayMinutes(caseItem)}m
+                            </span>
+                          )}
+                          {caseItem.isTest && (
+                            <span className="text-[11px] font-semibold bg-purple-900 text-purple-200 px-2 py-1 rounded-full">
+                              TEST
+                            </span>
+                          )}
+                          {evidenceLabel(caseItem.evidenceStatus) && (
+                            <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${
+                              caseItem.evidenceStatus === 'pending'
+                                ? 'bg-blue-900 text-blue-200'
+                                : 'bg-red-900 text-red-200'
+                            }`}>
+                              {evidenceLabel(caseItem.evidenceStatus)}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center space-x-4">

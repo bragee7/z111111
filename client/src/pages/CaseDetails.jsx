@@ -99,6 +99,22 @@ const CaseDetails = () => {
     });
   };
 
+  const delayMinutes = () => {
+    const captured = new Date(caseData.capturedAt || caseData.timestamp).getTime();
+    const received = new Date(caseData.receivedAt || caseData.createdAt || caseData.timestamp).getTime();
+    if (!Number.isFinite(captured) || !Number.isFinite(received)) return 0;
+    return Math.max(0, Math.round((received - captured) / 60000));
+  };
+
+  const evidenceLabel = (status) => {
+    if (status === 'pending') return 'Uploading';
+    if (status === 'partial') return 'Partial (some evidence missing)';
+    if (status === 'failed') return 'Upload failed';
+    if (status === 'missing') return 'Missing';
+    if (status === 'complete') return 'Complete';
+    return 'None';
+  };
+
   const handleVideoError = () => {
     console.error('Video playback error');
   };
@@ -146,9 +162,14 @@ const CaseDetails = () => {
             <tr><td>Case ID</td><td>${caseData.id}</td></tr>
             <tr><td>Status</td><td><span class="badge ${caseData.status === 'Pending' ? 'badge-pending' : 'badge-resolved'}">${caseData.status}</span></td></tr>
             <tr><td>Reporter</td><td>${caseData.userEmail || 'Unknown'}</td></tr>
-            <tr><td>Reported At</td><td>${formatDate(caseData.timestamp)}</td></tr>
+            <tr><td>Reported At</td><td>${formatDate(caseData.capturedAt || caseData.timestamp)}</td></tr>
+            <tr><td>Received At</td><td>${formatDate(caseData.receivedAt || caseData.createdAt || caseData.timestamp)}</td></tr>
+            <tr><td>Sync Delay</td><td>${delayMinutes() >= 1 ? `${delayMinutes()} minute(s)` : 'None'}</td></tr>
+            <tr><td>Sync Source</td><td>${caseData.syncSource === 'offline_sync' ? 'Offline capture, synchronized later' : 'Online'}</td></tr>
+            <tr><td>Evidence Status</td><td>${evidenceLabel(caseData.evidenceStatus)}</td></tr>
             <tr><td>Last Updated</td><td>${caseData.updatedAt ? formatDate(caseData.updatedAt) : formatDate(caseData.timestamp)}</td></tr>
             <tr><td>Trigger Type</td><td>${caseData.triggerType || 'Manual'}</td></tr>
+            ${caseData.isTest ? '<tr><td>Test Case</td><td>YES — not a real emergency</td></tr>' : ''}
           </table>
         </div>
 
@@ -163,6 +184,7 @@ const CaseDetails = () => {
         <div class="section">
           <h2>Media Evidence</h2>
           <table>
+            <tr><td>Evidence Status</td><td>${evidenceLabel(caseData.evidenceStatus)}</td></tr>
             <tr><td>Video Recording</td><td>${caseData.videoUrl ? 'Captured' : 'Not available'}</td></tr>
             <tr><td>Audio Recording</td><td>${caseData.audioUrl ? 'Captured' : 'Not available'}</td></tr>
           </table>
@@ -233,6 +255,34 @@ const CaseDetails = () => {
             <div>
               <h1 className="text-3xl font-bold text-white mb-2">Emergency Case Details</h1>
               <p className="text-gray-400">Case ID: {caseData.id}</p>
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                {caseData.syncSource === 'offline_sync' && (
+                  <span className="text-xs font-semibold bg-amber-900 text-amber-200 px-3 py-1 rounded-full">
+                    OFFLINE SYNC
+                  </span>
+                )}
+                {delayMinutes() >= 1 && (
+                  <span className="text-xs bg-gray-700 text-gray-300 px-3 py-1 rounded-full">
+                    Delayed {delayMinutes()}m
+                  </span>
+                )}
+                {caseData.isTest && (
+                  <span className="text-xs font-semibold bg-purple-900 text-purple-200 px-3 py-1 rounded-full">
+                    TEST CASE
+                  </span>
+                )}
+                {caseData.evidenceStatus && caseData.evidenceStatus !== 'none' && (
+                  <span className={`text-xs font-semibold px-3 py-1 rounded-full ${
+                    caseData.evidenceStatus === 'complete'
+                      ? 'bg-green-900 text-green-200'
+                      : caseData.evidenceStatus === 'pending'
+                        ? 'bg-blue-900 text-blue-200'
+                        : 'bg-red-900 text-red-200'
+                  }`}>
+                    EVIDENCE: {evidenceLabel(caseData.evidenceStatus).toUpperCase()}
+                  </span>
+                )}
+              </div>
             </div>
             <span className={`px-6 py-3 rounded-full text-lg font-bold ${
               caseData.status === 'Pending' 
@@ -436,8 +486,34 @@ const CaseDetails = () => {
                 <span className="text-white">{caseData.userEmail || 'Unknown'}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Timestamp:</span>
-                <span className="text-white text-sm">{formatDate(caseData.timestamp)}</span>
+                <span className="text-gray-400">Reported:</span>
+                <span className="text-white text-sm text-right">{formatDate(caseData.capturedAt || caseData.timestamp)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Received:</span>
+                <span className="text-white text-sm text-right">{formatDate(caseData.receivedAt || caseData.createdAt || caseData.timestamp)}</span>
+              </div>
+              {delayMinutes() >= 1 && (
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Sync Delay:</span>
+                  <span className="text-amber-300 text-sm font-semibold">{delayMinutes()} minute(s)</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span className="text-gray-400">Source:</span>
+                <span className="text-white text-sm">{caseData.syncSource === 'offline_sync' ? 'Offline capture, synced later' : 'Online'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Evidence:</span>
+                <span className={`text-sm font-semibold ${
+                  caseData.evidenceStatus === 'complete'
+                    ? 'text-green-400'
+                    : caseData.evidenceStatus === 'pending'
+                      ? 'text-blue-400'
+                      : 'text-red-400'
+                }`}>
+                  {evidenceLabel(caseData.evidenceStatus)}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Status:</span>

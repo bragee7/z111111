@@ -50,20 +50,55 @@ const handleMulterError = (err, req, res, next) => {
   next();
 };
 
-const extname = (mimetype) => {
+// The browser/phone may declare a generic or wrong content type (Dio defaults
+// to application/octet-stream), so prefer a real, allow-listed extension from
+// the original filename before falling back to the MIME family. Without this a
+// genuine .mp4 recording was stored on B2 as ".webm".
+const SAFE_EXTENSIONS = new Set([
+  '.mp4', '.mov', '.webm', '.mkv', '.3gp', '.m4v', '.m4a', '.aac', '.mp3', '.wav', '.ogg', '.opus',
+]);
+
+const extname = (mimetype = '', originalName = '') => {
+  const fromName = path.extname(originalName || '').toLowerCase();
+  if (SAFE_EXTENSIONS.has(fromName)) return fromName;
   if (mimetype.startsWith('video/')) {
     if (mimetype.includes('mp4')) return '.mp4';
     if (mimetype.includes('quicktime')) return '.mov';
     return '.webm';
   }
-  if (mimetype.startsWith('audio/')) return '.webm';
+  if (mimetype.startsWith('audio/')) {
+    if (mimetype.includes('mpeg')) return '.mp3';
+    if (mimetype.includes('mp4') || mimetype.includes('m4a')) return '.m4a';
+    return '.webm';
+  }
   return '.bin';
 };
 
-const uploadMedia = async (file) => {
+// Content-Type and filename can both lie (older builds always uploaded a
+// "*.webm" name for MP4 bytes). Sniff the container magic instead so the
+// stored object keeps the extension a reviewer's player expects.
+const sniffExtension = (filePath) => {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const header = Buffer.alloc(12);
+    const read = fs.readSync(fd, header, 0, header.length, 0);
+    fs.closeSync(fd);
+    if (read >= 12 && header.toString('ascii', 4, 8) === 'ftyp') return '.mp4';
+    if (read >= 4 && header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3) return '.webm';
+    if (read >= 12 && header.toString('ascii', 0, 4) === 'RIFF') {
+      return header.toString('ascii', 8, 12) === 'WAVE' ? '.wav' : '.avi';
+    }
+    if (read >= 3 && header.toString('ascii', 0, 3) === 'ID3') return '.mp3';
+  } catch (_) {}
+  return '';
+};
+
+const uploadMedia = async (file, { sniff = false } = {}) => {
   if (!file) return null;
 
-  const fileName = `${uuidv4()}${extname(file.mimetype)}`;
+  const extension = (sniff ? sniffExtension(file.path) : '') ||
+    extname(file.mimetype, file.originalname);
+  const fileName = `${uuidv4()}${extension}`;
 
   let sha256 = null;
   try {
@@ -128,6 +163,190 @@ const notifySOS = async (caseForEmail, videoUrl, audioUrl, userId) => {
   }
 };
 
+const asText = (value) => (value === undefined || value === null ? '' : String(value).trim());
+const truncate = (value, max) => asText(value).slice(0, max);
+const parseDate = (value) => {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+const parseBool = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  const normalized = asText(value).toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+const cleanupFile = (file) => {
+  if (!file || !file.path) return;
+  try { fs.unlink(file.path, () => {}); } catch (_) {}
+};
+const cleanupRequestFiles = (req) => {
+  for (const list of Object.values(req.files || {})) {
+    for (const file of list || []) cleanupFile(file);
+  }
+};
+const uploadEvidenceIfMissing = async (file, existingRef, existingSha, { sniff = false } = {}) => {
+  if (!file) {
+    return { ref: existingRef || null, sha: existingSha || null, attempted: false };
+  }
+  // Evidence is immutable once accepted. A retry must never overwrite the
+  // original recording with a different file.
+  if (existingRef) {
+    cleanupFile(file);
+    return { ref: existingRef, sha: existingSha || null, attempted: false };
+  }
+  const media = await uploadMedia(file, { sniff });
+  return {
+    ref: media ? media.publicUrl : null,
+    sha: media ? media.sha256 : null,
+    attempted: true,
+  };
+};
+const resolveEvidenceStatus = ({
+  evidenceExpected,
+  videoExpected,
+  audioExpected,
+  video,
+  audio,
+}) => {
+  const attempted = video.attempted || audio.attempted;
+  const uploaded = !!video.ref || !!audio.ref;
+  const failed = (video.attempted && !video.ref) || (audio.attempted && !audio.ref);
+  const expectedMissing =
+    (videoExpected && !video.ref) || (audioExpected && !audio.ref);
+
+  if (failed && uploaded) return 'partial';
+  if (failed) return 'failed';
+  // A missing expected track is not "complete" just because the other track
+  // uploaded successfully. This is what tells the phone to retry evidence
+  // instead of falsely reporting a fully-synced SOS.
+  if (expectedMissing) return uploaded ? 'partial' : 'missing';
+  if (uploaded) return 'complete';
+  return evidenceExpected ? 'missing' : 'none';
+};
+const isEvidenceFinal = (status) => status === 'complete' || status === 'none';
+
+const persistEvidence = async (
+  existingCase,
+  videoFile,
+  audioFile,
+  evidenceExpected,
+  videoExpected,
+  audioExpected
+) => {
+  const video = await uploadEvidenceIfMissing(
+    videoFile,
+    existingCase.video_url,
+    existingCase.video_sha256,
+    { sniff: true }
+  );
+  const audio = await uploadEvidenceIfMissing(
+    audioFile,
+    existingCase.audio_url,
+    existingCase.audio_sha256
+  );
+  const evidenceStatus = resolveEvidenceStatus({
+    evidenceExpected,
+    videoExpected,
+    audioExpected,
+    video,
+    audio,
+  });
+  const syncedAt = isEvidenceFinal(evidenceStatus)
+    ? (existingCase.synced_at || new Date())
+    : null;
+  const rows = await query(
+    `UPDATE sos_cases
+        SET video_url = $1, audio_url = $2, video_sha256 = $3, audio_sha256 = $4,
+            evidence_status = $5, synced_at = $6, updated_at = now()
+      WHERE id = $7
+      RETURNING *`,
+    [
+      video.ref,
+      audio.ref,
+      video.sha,
+      audio.sha,
+      evidenceStatus,
+      syncedAt,
+      existingCase.id,
+    ]
+  );
+  return rows[0];
+};
+
+const findExistingByClientReference = async (userId, clientReference) => {
+  try {
+    return await query(
+      'SELECT * FROM sos_cases WHERE user_id = $1 AND client_reference = $2 LIMIT 1',
+      [userId, clientReference]
+    );
+  } catch (error) {
+    // Deploy-before-migration: idempotency is unavailable until the migration
+    // runs, but an emergency must still be accepted.
+    if (error.code === '42703') {
+      console.warn('[sos] client_reference column missing; idempotency disabled until migration runs');
+      return [];
+    }
+    throw error;
+  }
+};
+
+const persistEvidenceLegacy = async (existingCase, videoFile, audioFile) => {
+  const video = await uploadEvidenceIfMissing(
+    videoFile,
+    existingCase.video_url,
+    existingCase.video_sha256,
+    { sniff: true }
+  );
+  const audio = await uploadEvidenceIfMissing(
+    audioFile,
+    existingCase.audio_url,
+    existingCase.audio_sha256
+  );
+  const rows = await query(
+    `UPDATE sos_cases
+        SET video_url = $1, audio_url = $2, video_sha256 = $3, audio_sha256 = $4,
+            updated_at = now()
+      WHERE id = $5
+      RETURNING *`,
+    [video.ref, audio.ref, video.sha, audio.sha, existingCase.id]
+  );
+  return rows[0];
+};
+
+const respondWithExistingCase = async (
+  existingCase,
+  req,
+  evidenceExpected,
+  videoExpected,
+  audioExpected,
+  videoFile,
+  audioFile
+) => {
+  const updated = await persistEvidence(
+    existingCase,
+    videoFile,
+    audioFile,
+    evidenceExpected,
+    videoExpected,
+    audioExpected
+  );
+  const mapped = await mapCase(updated);
+  emitCaseUpdated(mapped);
+  await auditLog(
+    req.user.userId,
+    updated.id,
+    'SOS_IDEMPOTENT_REPLAY',
+    `Duplicate SOS request for client reference ${existingCase.client_reference || '(none)'}; returned existing case`
+  );
+  return {
+    message: 'SOS case already exists',
+    duplicate: true,
+    case: mapped,
+  };
+};
+
 router.post('/', authMiddleware, (req, res, next) => {
   upload.fields([
     { name: 'video', maxCount: 1 },
@@ -138,12 +357,6 @@ router.post('/', authMiddleware, (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    const { locationLink, latitude, longitude, notes } = req.body;
-
-    const latValue = latitude && latitude.trim() ? String(latitude).trim() : null;
-    const lngValue = longitude && longitude.trim() ? String(longitude).trim() : null;
-    const locValue = locationLink && locationLink.trim() ? String(locationLink).trim() : null;
-
     if (!req.user) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
@@ -152,18 +365,85 @@ router.post('/', authMiddleware, (req, res, next) => {
       return res.status(403).json({ error: 'Police and admin accounts cannot create SOS cases' });
     }
 
+    const {
+      locationLink,
+      latitude,
+      longitude,
+      notes,
+    } = req.body;
+
+    const latValue = asText(latitude) || null;
+    const lngValue = asText(longitude) || null;
+    const locValue = asText(locationLink) || null;
+    const clientReference = truncate(req.body.clientReference, 120) || null;
+    const deviceId = truncate(req.body.deviceId, 200) || null;
+    const appVersion = truncate(req.body.appVersion, 80) || null;
+    const triggerType = truncate(req.body.triggerType, 40) || 'manual';
+
+    if (clientReference && !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(clientReference)) {
+      return res.status(400).json({ error: 'Invalid clientReference' });
+    }
+
     const videoFile = req.files?.video?.[0];
     const audioFile = req.files?.audio?.[0];
+    const hasUploadedFile = !!(videoFile || audioFile);
+    const evidenceExpected = req.body.evidenceExpected !== undefined
+      ? parseBool(req.body.evidenceExpected, hasUploadedFile)
+      : hasUploadedFile;
+    // New clients say which tracks they intended to record. Without this a
+    // video whose upload failed could look "complete" because audio uploaded.
+    // Legacy clients fall back to the files actually present.
+    const videoExpected = req.body.videoExpected !== undefined
+      ? parseBool(req.body.videoExpected, !!videoFile)
+      : !!videoFile;
+    const audioExpected = req.body.audioExpected !== undefined
+      ? parseBool(req.body.audioExpected, !!audioFile)
+      : !!audioFile;
 
-    const videoMedia = await uploadMedia(videoFile);
-    const audioMedia = await uploadMedia(audioFile);
-    const videoRef = videoMedia ? videoMedia.publicUrl : null;
-    const audioRef = audioMedia ? audioMedia.publicUrl : null;
-    const videoSha256 = videoMedia ? videoMedia.sha256 : null;
-    const audioSha256 = audioMedia ? audioMedia.sha256 : null;
+    const receivedAt = new Date();
+    const capturedAt = parseDate(req.body.capturedAt) || receivedAt;
+    const skewSeconds = Math.round((capturedAt.getTime() - receivedAt.getTime()) / 1000);
+    // A negative offset is the normal shape of an offline queue: the phone
+    // captured the alert, then delivered it minutes/hours later. Only a
+    // capturedAt in the FUTURE proves the device clock is wrong.
+    const clockSkewSeconds = skewSeconds > 300 ? skewSeconds : null;
+    const requestedSource = asText(req.body.syncSource);
+    const sendDelayMs = receivedAt.getTime() - capturedAt.getTime();
+    // Never trust "online" for a case that clearly arrived late. This keeps
+    // the dashboard honest even if the process died before the phone could
+    // update its local sync source.
+    const syncSource =
+      requestedSource === 'offline_sync' || sendDelayMs > 60_000
+        ? 'offline_sync'
+        : 'online';
+    const testRequested =
+      req.get('x-zelda-test') === '1' || parseBool(req.body.isTest, false);
+    const isTest =
+      testRequested &&
+      process.env.ALLOW_TEST_SOS === 'true' &&
+      process.env.NODE_ENV !== 'production';
 
-    const createdAt = new Date();
-    const updatedAt = new Date();
+    // Idempotency: the phone retries with the same stable reference. Find the
+    // case before touching media storage so a retry can never create a second
+    // emergency record.
+    if (clientReference) {
+      const existingRows = await findExistingByClientReference(
+        req.user.userId,
+        clientReference
+      );
+      if (existingRows.length > 0) {
+        const payload = await respondWithExistingCase(
+          existingRows[0],
+          req,
+          evidenceExpected,
+          videoExpected,
+          audioExpected,
+          videoFile,
+          audioFile
+        );
+        return res.status(200).json(payload);
+      }
+    }
 
     // Tamil Nadu: resolve nearest police station (backend authoritative, fail-open — SOS never blocked)
     let station = null;
@@ -180,109 +460,180 @@ router.post('/', authMiddleware, (req, res, next) => {
       }
     }
 
-    let result;
+    const initialEvidenceStatus = evidenceExpected ? 'pending' : 'none';
+    const initialSyncedAt = evidenceExpected ? null : receivedAt;
+
+    const insertValues = [
+      req.user.userId,
+      req.user.email,
+      locValue,
+      latValue,
+      lngValue,
+      'Pending',
+      notes || '',
+      triggerType,
+      receivedAt,
+      receivedAt,
+      clientReference,
+      capturedAt,
+      receivedAt,
+      initialSyncedAt,
+      syncSource,
+      initialEvidenceStatus,
+      deviceId,
+      appVersion,
+      isTest,
+      clockSkewSeconds,
+      station?.name ?? null,
+      station?.address ?? null,
+      station?.lat ?? null,
+      station?.lng ?? null,
+      station?.distanceM ?? null,
+      station?.osmId ?? null,
+      station?.osmType ?? null,
+      station?.fetchedAt ?? null,
+    ];
+    const placeholders = insertValues.map((_, index) => `$${index + 1}`).join(', ');
+    const conflictClause = clientReference
+      ? 'ON CONFLICT (user_id, client_reference) WHERE client_reference IS NOT NULL DO NOTHING'
+      : '';
+
+    let insertedRows;
+    let legacyInsert = false;
     try {
-      result = await query(
-        `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at,
-          nearest_police_station_name, nearest_police_station_address, nearest_police_station_lat, nearest_police_station_lng, nearest_police_station_distance_m, nearest_police_station_osm_id, nearest_police_station_osm_type, nearest_police_station_fetched_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id`,
-        [
-          req.user.userId,
-          req.user.email,
-          locValue,
-          latValue,
-          lngValue,
-          'Pending',
-          notes || '',
-          videoRef,
-          audioRef,
-          videoSha256,
-          audioSha256,
-          'manual',
-          createdAt,
-          updatedAt,
-          station?.name ?? null,
-          station?.address ?? null,
-          station?.lat ?? null,
-          station?.lng ?? null,
-          station?.distanceM ?? null,
-          station?.osmId ?? null,
-          station?.osmType ?? null,
-          station?.fetchedAt ?? null,
-        ]
+      insertedRows = await query(
+        `INSERT INTO sos_cases (
+           user_id, user_email, location_link, latitude, longitude, status, notes,
+           trigger_type, created_at, updated_at, client_reference, captured_at,
+           received_at, synced_at, sync_source, evidence_status, device_id,
+           app_version, is_test, clock_skew_seconds,
+           nearest_police_station_name, nearest_police_station_address,
+           nearest_police_station_lat, nearest_police_station_lng,
+           nearest_police_station_distance_m, nearest_police_station_osm_id,
+           nearest_police_station_osm_type, nearest_police_station_fetched_at
+         ) VALUES (${placeholders})
+         ${conflictClause}
+         RETURNING *`,
+        insertValues
       );
     } catch (e) {
-      // Column not yet migrated (e.g. Render prod before migration) → retry without station cols, keep SOS alive
+      // Deploy-before-migration safety: keep the emergency alert alive even if
+      // the offline columns are not present yet. Idempotency is unavailable in
+      // this degraded path; the migration must be applied immediately.
       if (e.code === '42703') {
-        console.warn('[sos] station columns missing, retrying without them:', e.message);
-        result = await query(
-          `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, video_url, audio_url, video_sha256, audio_sha256, trigger_type, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
-          [req.user.userId, req.user.email, locValue, latValue, lngValue, 'Pending', notes || '', videoRef, audioRef, videoSha256, audioSha256, 'manual', createdAt, updatedAt]
+        console.warn('[sos] offline-sync columns missing; using legacy insert:', e.message);
+        legacyInsert = true;
+        insertedRows = await query(
+          `INSERT INTO sos_cases (user_id, user_email, location_link, latitude, longitude, status, notes, trigger_type, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+          [
+            req.user.userId,
+            req.user.email,
+            locValue,
+            latValue,
+            lngValue,
+            'Pending',
+            notes || '',
+            triggerType,
+            receivedAt,
+            receivedAt,
+          ]
         );
-        station = null;
-      } else { throw e; }
+      } else {
+        throw e;
+      }
     }
 
-    const insertId = result[0].id;
+    if (!insertedRows || insertedRows.length === 0) {
+      // Another request won the unique-index race between our SELECT and INSERT.
+      if (!clientReference) {
+        throw new Error('SOS insert returned no row without a client reference');
+      }
+      const racedRows = await findExistingByClientReference(
+        req.user.userId,
+        clientReference
+      );
+      if (racedRows.length === 0) {
+        throw new Error('SOS insert conflicted but the existing case was not found');
+      }
+      const payload = await respondWithExistingCase(
+        racedRows[0],
+        req,
+        evidenceExpected,
+        videoExpected,
+        audioExpected,
+        videoFile,
+        audioFile
+      );
+      return res.status(200).json(payload);
+    }
 
-    await auditLog(req.user.userId, insertId, 'SOS_CREATED', `SOS alert created by user ${req.user.email}`);
+    const insertedCase = insertedRows[0];
+    const insertId = insertedCase.id;
 
-    const caseForEmail = {
-      id: insertId,
-      user_id: req.user.userId,
-      user_email: req.user.email,
-      location_link: locationLink || null,
-      status: 'Pending',
-      notes: notes || '',
-      created_at: createdAt
-    };
+    await auditLog(
+      req.user.userId,
+      insertId,
+      syncSource === 'offline_sync' ? 'SOS_CREATED_OFFLINE' : 'SOS_CREATED',
+      syncSource === 'offline_sync'
+        ? `Offline SOS captured at ${capturedAt.toISOString()} and received at ${receivedAt.toISOString()}`
+        : `SOS alert created by user ${req.user.email}`
+    );
 
-    // Resolve once for the email/socket payload. The database keeps the durable
-    // reference (b2://...) and every API read signs a fresh URL.
-    const [videoUrl, audioUrl] = await Promise.all([
-      storage.resolveUrl(videoRef, 7 * 24 * 60 * 60),
-      storage.resolveUrl(audioRef, 7 * 24 * 60 * 60)
-    ]);
+    // Emit immediately so the dashboard receives the emergency even while a
+    // large video is still uploading.
+    emitNewCase(await mapCase(insertedCase));
 
-    notifySOS(caseForEmail, videoUrl, audioUrl, req.user.userId);
+    const completedCase = legacyInsert
+      ? await persistEvidenceLegacy(insertedCase, videoFile, audioFile)
+      : await persistEvidence(
+          insertedCase,
+          videoFile,
+          audioFile,
+          evidenceExpected,
+          videoExpected,
+          audioExpected
+        );
+    const mappedCase = await mapCase(completedCase);
 
-    const newCase = {
-      id: insertId,
-      user_id: req.user.userId,
-      user_email: req.user.email,
-      location_link: locationLink || null,
-      latitude: latValue,
-      longitude: lngValue,
-      status: 'Pending',
-      notes: notes || '',
-      video_url: videoUrl,
-      audio_url: audioUrl,
-      video_sha256: videoSha256,
-      audio_sha256: audioSha256,
-      trigger_type: 'manual',
-      created_at: createdAt,
-      updated_at: updatedAt,
-      nearest_police_station_name: station?.name ?? null,
-      nearest_police_station_address: station?.address ?? null,
-      nearest_police_station_lat: station?.lat ?? null,
-      nearest_police_station_lng: station?.lng ?? null,
-      nearest_police_station_distance_m: station?.distanceM ?? null,
-      nearest_police_station_osm_id: station?.osmId ?? null,
-      nearest_police_station_osm_type: station?.osmType ?? null,
-      nearest_police_station_fetched_at: station?.fetchedAt ?? null,
-    };
+    emitCaseUpdated(mappedCase);
 
-    emitNewCase(newCase);
+    // Notify on the first insert only. Even an offline case whose evidence
+    // upload failed must reach the police email channel; the dashboard still
+    // shows evidenceStatus=failed so nobody assumes the video is available.
+    if (!isTest) {
+      const [videoUrl, audioUrl] = await Promise.all([
+        storage.resolveUrl(completedCase.video_url, 7 * 24 * 60 * 60),
+        storage.resolveUrl(completedCase.audio_url, 7 * 24 * 60 * 60),
+      ]);
+      const caseForEmail = {
+        id: insertId,
+        user_id: req.user.userId,
+        user_email: req.user.email,
+        location_link: locValue,
+        status: 'Pending',
+        notes: notes || '',
+        created_at: receivedAt,
+        captured_at: capturedAt,
+        received_at: receivedAt,
+        sync_source: syncSource,
+      };
+      // Fire-and-forget: notification failures must not fail the SOS response.
+      notifySOS(caseForEmail, videoUrl, audioUrl, req.user.userId);
+    }
 
-    res.status(201).json({
+    return res.status(201).json({
       message: 'SOS case created successfully',
-      case: newCase
+      duplicate: false,
+      case: mappedCase,
     });
   } catch (error) {
     console.error('Create case error:', error);
-    res.status(500).json({ error: 'Error creating SOS case' });
+    return res.status(500).json({ error: 'Error creating SOS case' });
+  } finally {
+    // uploadMedia deletes successful temp files; this covers validation errors
+    // and duplicate requests that never reached the uploader.
+    cleanupRequestFiles(req);
   }
 });
 
@@ -300,7 +651,18 @@ const mapCase = async (c) => ({
   videoSha256: c.video_sha256,
   audioSha256: c.audio_sha256,
   triggerType: c.trigger_type,
-  timestamp: c.created_at,
+  // The incident time is preserved across an offline sync. `timestamp` keeps
+  // the old contract working but now prefers the captured time.
+  capturedAt: c.captured_at || c.created_at,
+  receivedAt: c.received_at || c.created_at,
+  syncedAt: c.synced_at || null,
+  syncSource: c.sync_source || 'online',
+  evidenceStatus: c.evidence_status || (c.video_url || c.audio_url ? 'complete' : 'none'),
+  deviceId: c.device_id || null,
+  appVersion: c.app_version || null,
+  isTest: c.is_test === true,
+  clockSkewSeconds: c.clock_skew_seconds ?? null,
+  timestamp: c.captured_at || c.created_at,
   createdAt: c.created_at,
   updatedAt: c.updated_at,
   closureReason: c.closure_reason,
